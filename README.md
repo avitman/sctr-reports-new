@@ -1,10 +1,10 @@
 # SCTR Daily Scanner
 
-Automated stock scanner that filters S&P 500 stocks by SCTR ≥ 90 and strict technical criteria. Runs every weekday via GitHub Actions, stores results in Supabase, and serves a live Streamlit dashboard.
+Automated stock scanner that filters stocks by SCTR ≥ 90 and strict technical criteria. Runs every weekday via GitHub Actions, stores results in Supabase, and serves a live dashboard on Netlify.
 
 ## What it does
 
-Every weekday at 10:00 AM Israel time the scraper:
+Every weekday the scraper:
 1. Scrapes the SCTR table from StockCharts using Playwright
 2. Filters stocks where SCTR ≥ 90 and volume > 1M
 3. Fetches 1-year OHLCV data via yfinance and computes RSI, ATR, VWAP, AVWAP, moving averages
@@ -19,7 +19,7 @@ Every weekday at 10:00 AM Israel time the scraper:
 | Automation | GitHub Actions (cron) |
 | Scraping | Playwright + yfinance |
 | Database | Supabase (PostgreSQL) |
-| Dashboard | Streamlit Community Cloud |
+| Dashboard | Netlify (static site + serverless functions) |
 | Alerts | Telegram Bot |
 
 ## Project structure
@@ -27,31 +27,41 @@ Every weekday at 10:00 AM Israel time the scraper:
 ```
 ├── .github/workflows/daily_scan.yml   # Cron scheduler (Tue–Sat, 07:00 UTC)
 ├── scraper/scrape_sctr.py             # Main scraper
-├── dashboard/
-│   ├── app.py                         # Streamlit dashboard
-│   └── doc/dashboard_spec.md
-├── requirements.txt
+├── site/                              # Netlify frontend
+│   ├── index.html
+│   ├── style.css
+│   └── app.js
+├── netlify/functions/                 # Netlify serverless functions
+│   ├── config.js                      # Serves Supabase credentials to browser
+│   ├── pullbacks.js                   # Yahoo Finance weekly price proxy
+│   ├── stocktwits.js                  # StockTwits trending proxy
+│   └── package.json
+├── netlify.toml                       # Netlify build config
 └── .gitignore
 ```
 
-## Dashboard features
+## Dashboard tabs
 
-- **Top Picks** — composite score ranked by consistency, SCTR, momentum, volume trend, RSI, earnings safety
-- **Short-Term Swing** — today's stocks ranked by swing score with ATR-based entry, stop, and take-profit levels
-- **Sector Analysis** — sector rotation charts over time
-- **Stock Deep Dive** — per-symbol SCTR, price vs MAs, volume, and RSI history
-- **Daily History** — browse any past scan date
-- **Full Rankings** — export scored rankings to CSV
+| Tab | Purpose |
+|---|---|
+| 🏆 Top Picks | Composite-scored stocks ranked by SCTR, consistency, momentum, volume, RSI, earnings safety |
+| ⚡ Short-Term Swing | Today's stocks ranked for 1–5 day trades with ATR-based entry, stop, and take-profit levels |
+| 📉 Weekly Pullback | Strong SCTR stocks that dropped significantly this week — mean-reversion entries |
+| 📣 Social Buzz | StockTwits trending symbols cross-referenced with the SCTR scanner |
+| 📊 Sector Analysis | Sector rotation over time, avg SCTR by sector, momentum signals |
+| 🔍 Stock Deep Dive | Per-stock SCTR history, price vs MAs, volume, RSI |
+| 📅 Daily History | Browse the full scanner list for any past date |
+| 📄 Spec | Technical documentation of the scoring model |
 
 ## Setup
 
 ### 1. Supabase
 
-Create a project at [supabase.com](https://supabase.com) and run the schema in `dashboard/doc/dashboard_spec.md` (or use the SQL in the setup guide).
+Create a project at [supabase.com](https://supabase.com) and run the schema in `dashboard/doc/dashboard_spec.md`.
 
-### 2. GitHub Secrets
+### 2. GitHub Secrets (for the scraper)
 
-In your repo go to **Settings → Secrets and variables → Actions** and add:
+Go to **Settings → Secrets and variables → Actions** and add:
 
 | Secret | Value |
 |---|---|
@@ -60,15 +70,30 @@ In your repo go to **Settings → Secrets and variables → Actions** and add:
 | `TELEGRAM_TOKEN` | Your Telegram bot token |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat ID |
 
-### 3. Streamlit Community Cloud
+### 3. Deploy to Netlify
 
-Deploy `dashboard/app.py` at [share.streamlit.io](https://share.streamlit.io) and add the Supabase secrets under **Advanced settings**:
+1. Push this repo to GitHub
+2. Go to [app.netlify.com](https://app.netlify.com) → **Add new site → Import an existing project**
+3. Select the repo — Netlify auto-detects `netlify.toml` (publish: `site`, functions: `netlify/functions`)
+4. Go to **Site configuration → Environment variables** and add:
 
-```toml
-SUPABASE_URL = "https://xxxx.supabase.co"
-SUPABASE_KEY = "your-anon-key"
+| Variable | Value |
+|---|---|
+| `SUPABASE_URL` | Your Supabase project URL |
+| `SUPABASE_KEY` | Your Supabase anon key |
+
+5. Trigger a redeploy — your dashboard is live at `https://your-site.netlify.app`
+
+### 4. Run locally
+
+```bash
+python3 -m http.server 8080 --directory site/
 ```
 
-### 4. Manual trigger
+Open [http://localhost:8080](http://localhost:8080). On first load the app shows a credentials prompt — enter your Supabase URL and anon key. They are saved in `localStorage` so you only need to do this once.
 
-You can trigger the scraper manually anytime from **Actions → Daily SCTR Scan → Run workflow**.
+> The Weekly Pullback tab requires the Netlify serverless function (Yahoo Finance) and won't work in local dev.
+
+### 5. Manual scraper trigger
+
+Trigger the scraper anytime from **Actions → Daily SCTR Scan → Run workflow**.

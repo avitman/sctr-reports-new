@@ -232,10 +232,18 @@
           <p class="panel-caption">Strong SCTR stocks in a temporary intra-week dip — mean-reversion entries.</p>
         </div>
         <div class="control-row">
-          <label class="filter-label">Min High→Low drop</label>
-          <input type="range" class="slider slim" id="pb-drop" min="5" max="40" value="15" />
-          <span class="slider-val" id="pb-drop-val">15%</span>
+          <label class="filter-label">Min drop</label>
+          <input type="range" class="slider slim" id="pb-drop" min="3" max="40" value="5" />
+          <span class="slider-val" id="pb-drop-val">5%</span>
+          <label class="filter-label" style="margin-left:12px">Max drop</label>
+          <input type="range" class="slider slim" id="pb-drop-max" min="5" max="60" value="20" />
+          <span class="slider-val" id="pb-drop-max-val">20%</span>
           <button class="btn-primary" onclick="loadPullbacks()">Fetch Data</button>
+        </div>
+        <div class="info-msg" style="display:block;margin-bottom:12px">
+          <strong style="color:var(--cyan)">How to read this:</strong>
+          Keep Max drop ≤ 20% to focus on <em>technical</em> pullbacks. Large drops (&gt;25%) are usually earnings reactions — a different trade entirely.
+          The <strong>Recovery %</strong> column is key: near 0% = stock still at the low (opportunity open), near 100% = already bounced (missed entry).
         </div>
         <div id="pb-status" class="info-msg" style="display:none"></div>
         <div id="chart-pb-drop" class="chart-box" style="display:none"></div>

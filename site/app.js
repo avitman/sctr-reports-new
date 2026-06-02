@@ -370,6 +370,7 @@ function wireFilters() {
   link('top-n',         'top-n-val',         v => `${v} stocks`);
   link('swing-n',       'swing-n-val',       v => `${v} stocks`);
   link('pb-drop',       'pb-drop-val',       v => `${v}%`);
+  link('pb-drop-max',   'pb-drop-max-val',   v => `${v}%`);
 
   document.getElementById('f-only-today').addEventListener('change', update);
   document.getElementById('f-earn-days').addEventListener('change', update);
@@ -525,11 +526,78 @@ function renderSwing() {
   });
 }
 
+// ── Yahoo Finance browser fallback ────────────────────────
+async function fetchSymbolYahoo(sym) {
+  const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d&includePrePost=false`;
+
+  // Try direct fetch first
+  try {
+    const r = await fetch(chartUrl, { signal: AbortSignal.timeout(6000), headers: { Accept: 'application/json' } });
+    if (r.ok) return await r.json();
+  } catch {}
+
+  // CORS proxy fallback (for local dev)
+  const proxies = [
+    `https://corsproxy.io/?${encodeURIComponent(chartUrl)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(chartUrl)}`,
+  ];
+  for (const proxy of proxies) {
+    try {
+      const r = await fetch(proxy, { signal: AbortSignal.timeout(10000) });
+      if (r.ok) return await r.json();
+    } catch {}
+  }
+  return null;
+}
+
+async function fetchPullbacksFromYahoo(symbols, onProgress) {
+  const results = [];
+  const CONCURRENCY = 6;
+  let done = 0;
+
+  for (let i = 0; i < symbols.length; i += CONCURRENCY) {
+    const batch = symbols.slice(i, i + CONCURRENCY);
+    await Promise.all(batch.map(async sym => {
+      try {
+        const data   = await fetchSymbolYahoo(sym);
+        const result = data?.chart?.result?.[0];
+        if (!result) return;
+
+        const q      = result.indicators.quote[0];
+        const highs  = (q.high  || []).filter(v => v != null);
+        const lows   = (q.low   || []).filter(v => v != null);
+        const closes = (q.close || []).filter(v => v != null);
+        if (!highs.length || !lows.length || !closes.length) return;
+
+        const weekHigh   = Math.max(...highs);
+        const weekLow    = Math.min(...lows);
+        const current    = closes[closes.length - 1];
+        const priceRange = weekHigh - weekLow;
+
+        results.push({
+          SYMBOL:        sym,
+          WEEK_HIGH:     round2(weekHigh),
+          WEEK_LOW:      round2(weekLow),
+          CURRENT:       round2(current),
+          DROP_PCT:      Math.round(priceRange / weekHigh * 1000) / 10,
+          FROM_HIGH_PCT: Math.round((current - weekHigh) / weekHigh * 1000) / 10,
+          RECOVERY_PCT:  priceRange > 0 ? Math.round((current - weekLow) / priceRange * 1000) / 10 : 50,
+        });
+      } catch { /* skip symbol */ }
+      done++;
+      if (onProgress) onProgress(done, symbols.length, results.length);
+    }));
+  }
+
+  return results.sort((a, b) => b.DROP_PCT - a.DROP_PCT);
+}
+
 // ── Tab: Weekly Pullback ───────────────────────────────────
 async function loadPullbacks() {
-  const d7     = offsetDate(latestDate, -7);
-  const syms   = [...new Set(allData.filter(r => r.DATE >= d7).map(r => r.SYMBOL))];
+  const d7      = offsetDate(latestDate, -7);
+  const syms    = [...new Set(allData.filter(r => r.DATE >= d7).map(r => r.SYMBOL))];
   const minDrop = +document.getElementById('pb-drop').value;
+  const maxDrop = +document.getElementById('pb-drop-max').value;
 
   if (!syms.length) {
     showInfoMsg('pb-status', 'No symbols in the past week.', 'warn');
@@ -541,24 +609,53 @@ async function loadPullbacks() {
   document.getElementById('chart-pb-range').style.display = 'none';
 
   try {
-    const url = `/api/pullbacks?symbols=${syms.join(',')}`;
-    const res = await fetch(url);
-    const raw = await res.json();
+    let raw;
+
+    // Try Netlify function first (production)
+    const res = await fetch(`/api/pullbacks?symbols=${syms.join(',')}`);
+    if (res.ok) {
+      raw = await res.json();
+    } else {
+      // Fallback: fetch Yahoo Finance chart API directly from the browser
+      showInfoMsg('pb-status', `Fetching from Yahoo Finance (0 / ${syms.length} symbols)…`, '');
+      raw = await fetchPullbacksFromYahoo(syms, (done, total, found) => {
+        showInfoMsg('pb-status', `Fetching from Yahoo Finance (${done} / ${total} symbols, ${found} with data)…`, '');
+      });
+      if (!raw.length) {
+        showInfoMsg('pb-status', 'Yahoo Finance returned no data — possibly CORS-blocked in this browser. Try deploying to Netlify.', 'warn');
+        return;
+      }
+    }
 
     const pb = raw
-      .filter(r => r.DROP_PCT >= minDrop)
+      .filter(r => r.DROP_PCT >= minDrop && r.DROP_PCT <= maxDrop)
       .map(r => {
         const sc = scores.find(s => s.SYMBOL === r.SYMBOL) || {};
+        // Flag stocks where earnings likely just happened (low EARN_DAYS = post-earnings drop risk)
+        const earnDays = sc.EARN_DAYS;
+        const earningsFlag = earnDays != null && earnDays <= 14;
         return { ...r, LATEST_SCTR: sc.LATEST_SCTR, SECTOR: sc.SECTOR, NAME: sc.NAME,
-                 SCORE: sc.SCORE, SCTR_MOMENTUM: sc.SCTR_MOMENTUM, EARN_DAYS: sc.EARN_DAYS };
+                 SCORE: sc.SCORE, SCTR_MOMENTUM: sc.SCTR_MOMENTUM, EARN_DAYS: earnDays,
+                 EARNINGS_FLAG: earningsFlag };
       });
 
-    showInfoMsg('pb-status', `${pb.length} stocks with ≥ ${minDrop}% weekly pullback.`, '');
+    const excluded = raw.filter(r => r.DROP_PCT > maxDrop).length;
 
     if (!pb.length) {
+      const allDrops = raw.map(r => r.DROP_PCT).filter(Boolean).sort((a,b) => b - a);
+      const topDrop  = allDrops[0] ? allDrops[0].toFixed(1) : '?';
+      showInfoMsg('pb-status',
+        `0 stocks in the ${minDrop}–${maxDrop}% range out of ${raw.length} fetched. ` +
+        `Largest drop: ${topDrop}%${excluded ? ` (${excluded} excluded above ${maxDrop}% — likely earnings)` : ''}. Try adjusting the sliders.`, 'warn');
       document.getElementById('table-pullback').innerHTML = '';
       return;
     }
+
+    const earningsFlagged = pb.filter(r => r.EARNINGS_FLAG).length;
+    showInfoMsg('pb-status',
+      `${pb.length} stocks with ${minDrop}–${maxDrop}% pullback` +
+      (excluded ? ` · ${excluded} excluded >${ maxDrop}% (likely earnings reactions)` : '') +
+      (earningsFlagged ? ` · ⚠ ${earningsFlagged} have earnings within 14 days` : ''), '');
 
     // Drop % bar
     document.getElementById('chart-pb-drop').style.display = 'block';
@@ -566,17 +663,30 @@ async function loadPullbacks() {
       type: 'bar', orientation: 'h',
       x: pb.map(r => r.DROP_PCT),
       y: pb.map(r => r.SYMBOL),
-      marker: { color: pb.map(r => `rgba(255,${Math.round(255 * (1 - r.DROP_PCT / 40))},71,0.8)`) },
-      hovertemplate: '<b>%{y}</b><br>Drop: %{x:.1f}%<extra></extra>',
-      text: pb.map(r => r.DROP_PCT.toFixed(1) + '%'),
+      // Green = clean technical pullback, gold = earnings nearby, color fades with recovery
+      marker: {
+        color: pb.map(r => {
+          const recovered = (r.RECOVERY_PCT ?? 0) / 100;
+          if (r.EARNINGS_FLAG) return `rgba(255,${Math.round(165 + 90 * recovered)},0,0.85)`;
+          return `rgba(${Math.round(0 + 60 * recovered)},${Math.round(200 - 80 * recovered)},255,0.8)`;
+        }),
+      },
+      hovertemplate: pb.map(r =>
+        `<b>${r.SYMBOL}</b>${r.EARNINGS_FLAG ? ' ⚠ earnings nearby' : ''}<br>` +
+        `Drop: ${r.DROP_PCT.toFixed(1)}%<br>` +
+        `Recovery: ${(r.RECOVERY_PCT ?? 0).toFixed(0)}%` +
+        (r.RECOVERY_PCT < 30 ? ' — still near low ✓' : r.RECOVERY_PCT > 70 ? ' — mostly recovered' : '') +
+        `<extra></extra>`
+      ),
+      text: pb.map(r => `${r.DROP_PCT.toFixed(1)}%  ${(r.RECOVERY_PCT ?? 0).toFixed(0)}% rec.`),
       textposition: 'outside',
-      textfont: { color: '#8ab4cf', size: 11 },
+      textfont: { color: '#8ab4cf', size: 10 },
     }], {
       ...plotlyBase(),
-      title: { text: `Weekly High→Low Drop % (≥ ${minDrop}%)`, font: { color: '#d4e8f4', size: 15 } },
-      height: Math.max(320, pb.length * 32),
+      title: { text: `Technical Pullbacks ${minDrop}–${maxDrop}%  ·  Blue = near low (buy zone) · Gold = earnings risk`, font: { color: '#d4e8f4', size: 14 } },
+      height: Math.max(320, pb.length * 36),
       yaxis: { categoryorder: 'total ascending', tickfont: { color: '#7aadcc', family: 'JetBrains Mono' } },
-      margin: { t: 50, r: 70, b: 40, l: 90 },
+      margin: { t: 50, r: 140, b: 40, l: 90 },
     }, plotlyConfig());
 
     // Range chart
@@ -628,19 +738,45 @@ async function loadSocial() {
   document.getElementById('social-table-expander').style.display = 'none';
 
   try {
-    // Try the Netlify proxy first; fall back to direct StockTwits API for local dev
+    const ST_URL = 'https://api.stocktwits.com/api/2/trending/symbols.json';
+    const parseStockTwits = async r => {
+      const json = await r.json();
+      return (json.symbols || []).map(s => ({
+        SYMBOL: s.symbol, ST_NAME: s.title || '', WATCHLIST_COUNT: s.watchlist_count || 0,
+      }));
+    };
+
     let trending;
+
+    // 1. Netlify function (production)
     try {
-      const r1 = await fetch('/api/stocktwits', { signal: AbortSignal.timeout(5000) });
-      if (r1.ok) trending = await r1.json();
+      const r = await fetch('/api/stocktwits', { signal: AbortSignal.timeout(5000) });
+      if (r.ok) trending = await parseStockTwits(r);
     } catch {}
+
+    // 2. Direct fetch (sometimes works locally)
     if (!trending) {
-      const r2 = await fetch('https://api.stocktwits.com/api/2/trending/symbols.json', {
-        headers: { 'Accept': 'application/json' },
-      });
-      const json = await r2.json();
-      trending = (json.symbols || []).map(s => ({ SYMBOL: s.symbol, ST_NAME: s.title || '', WATCHLIST_COUNT: s.watchlist_count || 0 }));
+      try {
+        const r = await fetch(ST_URL, { signal: AbortSignal.timeout(5000) });
+        if (r.ok) trending = await parseStockTwits(r);
+      } catch {}
     }
+
+    // 3. CORS proxy fallback (for local dev where StockTwits blocks direct requests)
+    if (!trending) {
+      const proxies = [
+        `https://corsproxy.io/?${encodeURIComponent(ST_URL)}`,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(ST_URL)}`,
+      ];
+      for (const proxyUrl of proxies) {
+        try {
+          const r = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+          if (r.ok) { trending = await parseStockTwits(r); break; }
+        } catch {}
+      }
+    }
+
+    if (!trending) throw new Error('All StockTwits fetch attempts failed (CORS restriction in local dev).');
 
     if (!Array.isArray(trending) || !trending.length) {
       cards.innerHTML = '<div class="info-msg warn-msg">No trending data available.</div>';
