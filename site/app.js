@@ -741,9 +741,14 @@ async function loadSocial() {
     const ST_URL = 'https://api.stocktwits.com/api/2/trending/symbols.json';
     const parseStockTwits = async r => {
       const json = await r.json();
-      return (json.symbols || []).map(s => ({
-        SYMBOL: s.symbol, ST_NAME: s.title || '', WATCHLIST_COUNT: s.watchlist_count || 0,
-      }));
+      // Netlify function returns a pre-mapped flat array; raw StockTwits API returns { symbols: [...] }
+      const arr = Array.isArray(json) ? json : (json.symbols || []);
+      return arr.map(s => ({
+        SYMBOL:          s.SYMBOL          || s.symbol  || '',
+        ST_NAME:         s.ST_NAME         || s.title   || '',
+        WATCHLIST_COUNT: s.WATCHLIST_COUNT || s.watchlist_count || 0,
+        SOURCE:          s.SOURCE          || 'stocktwits',
+      })).filter(s => s.SYMBOL);
     };
 
     let trending;
