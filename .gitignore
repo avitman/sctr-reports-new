@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Secrets
+.telegram_config
+
+# Runtime artifacts
+*.log
+yfinance_cache.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Output data (goes to Supabase, not git)
+2*/
+*.csv
