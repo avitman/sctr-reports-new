@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SCTR Investment Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" defer></script>
+</head>
+<body>
+
+<!-- ── Config Prompt (local dev) ────────────────────────────────────── -->
+<div id="config-overlay" style="display:none">
+  <div class="loader-box" style="gap:20px;max-width:420px;width:90%;text-align:left">
+    <div style="text-align:center">
+      <div style="font-size:32px">📈</div>
+      <p class="loader-title" style="margin-bottom:4px">SCTR Dashboard</p>
+      <p style="font-size:12px;color:var(--text-muted)">Enter your Supabase credentials to connect</p>
+    </div>
+    <div style="width:100%;display:flex;flex-direction:column;gap:10px">
+      <div>
+        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Supabase URL</label>
+        <input id="cfg-url" type="text" placeholder="https://xxxx.supabase.co"
+          style="width:100%;background:var(--bg-raised);border:1px solid var(--border);color:var(--text-primary);padding:9px 12px;border-radius:6px;font-size:13px;font-family:var(--font-mono);outline:none" />
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Supabase Anon Key</label>
+        <input id="cfg-key" type="password" placeholder="eyJ…"
+          style="width:100%;background:var(--bg-raised);border:1px solid var(--border);color:var(--text-primary);padding:9px 12px;border-radius:6px;font-size:13px;font-family:var(--font-mono);outline:none" />
+      </div>
+      <p id="cfg-error" style="display:none;font-size:12px;color:var(--red);padding:6px 10px;background:rgba(255,71,87,.08);border-radius:4px;border:1px solid rgba(255,71,87,.2)"></p>
+      <button onclick="submitConfig()"
+        style="background:rgba(0,212,255,.14);border:1px solid rgba(0,212,255,.3);color:var(--cyan);padding:10px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;font-family:var(--font-body)">
+        Connect →
+      </button>
+      <p style="font-size:11px;color:var(--text-muted);text-align:center">Credentials saved in browser localStorage only</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Loading Overlay ─────────────────────────────────────────────── -->
+<div id="loading-overlay">
+  <div class="loader-box">
+    <div class="loader-rings">
+      <div class="ring ring-1"></div>
+      <div class="ring ring-2"></div>
+      <div class="ring ring-3"></div>
+    </div>
+    <div class="loader-logo">📈</div>
+    <p class="loader-title">SCTR Dashboard</p>
+    <p id="loading-text" class="loader-status">Initializing…</p>
+  </div>
+</div>
+
+<!-- ── App Shell ───────────────────────────────────────────────────── -->
+<div id="app" style="display:none">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-left">
+      <span class="logo-icon">📈</span>
+      <div>
+        <div class="logo-text">SCTR Intelligence</div>
+        <div class="logo-sub">Stock Chart Technical Ranking Dashboard</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="status-pill">
+        <span class="status-dot"></span>
+        <span id="last-updated-text">Live</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- KPI Bar -->
+  <div class="kpi-bar">
+    <div class="kpi-card">
+      <div class="kpi-label">Trading Days</div>
+      <div class="kpi-value" id="kpi-days">—</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Unique Stocks</div>
+      <div class="kpi-value" id="kpi-stocks">—</div>
+    </div>
+    <div class="kpi-card kpi-card--wide">
+      <div class="kpi-label">Date Range</div>
+      <div class="kpi-value kpi-value--sm" id="kpi-range">—</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Today's List</div>
+      <div class="kpi-value" id="kpi-today">—</div>
+    </div>
+  </div>
+
+  <!-- Body -->
+  <div class="body-layout">
+
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <button class="sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()">⚙ Filters</button>
+      <div class="sidebar-inner" id="sidebar-inner">
+        <div class="filter-section">
+          <div class="filter-group">
+            <label class="filter-label">Min Consistency %</label>
+            <div class="slider-wrap">
+              <input type="range" class="slider" id="f-consistency" min="0" max="100" value="20" />
+              <span class="slider-val" id="f-consistency-val">20%</span>
+            </div>
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Min Latest SCTR</label>
+            <div class="slider-wrap">
+              <input type="range" class="slider" id="f-sctr" min="85" max="99" value="90" />
+              <span class="slider-val" id="f-sctr-val">90</span>
+            </div>
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Sectors</label>
+            <div id="sector-checkboxes" class="sector-checks"></div>
+          </div>
+          <div class="filter-group">
+            <label class="toggle-row">
+              <input type="checkbox" id="f-only-today" />
+              <span class="toggle-custom"></span>
+              Only today's stocks
+            </label>
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Exclude earnings within N days</label>
+            <input type="number" class="num-input" id="f-earn-days" min="0" max="60" value="10" />
+          </div>
+        </div>
+
+        <div class="sidebar-divider"></div>
+
+        <div class="weights-box">
+          <div class="weights-title">Score Weights</div>
+          <div class="weight-row"><span>Consistency</span><span class="w-val">25%</span></div>
+          <div class="weight-row"><span>SCTR level</span><span class="w-val">20%</span></div>
+          <div class="weight-row"><span>SCTR momentum</span><span class="w-val">20%</span></div>
+          <div class="weight-row"><span>Volume trend</span><span class="w-val">15%</span></div>
+          <div class="weight-row"><span>RSI health</span><span class="w-val">10%</span></div>
+          <div class="weight-row"><span>Earnings safety</span><span class="w-val">5%</span></div>
+          <div class="weight-row"><span>In today's list</span><span class="w-val">5%</span></div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main-content">
+
+      <!-- Tab Guide -->
+      <div class="guide-bar">
+        <button class="guide-toggle" onclick="toggleGuide()">
+          📖 Tab Guide <span id="guide-arrow">▼</span>
+        </button>
+        <div id="guide-content" class="guide-content" style="display:none">
+          <table class="guide-table">
+            <thead><tr><th>Tab</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td>🏆 Top Picks</td><td>Composite-scored stocks ranked by SCTR, consistency, momentum, volume, RSI, earnings safety. Best for swing candidates.</td></tr>
+              <tr><td>⚡ Short-Term Swing</td><td>Today's stocks ranked for 1–5 day trades with ATR-based entry, stop, and TP levels.</td></tr>
+              <tr><td>📉 Weekly Pullback</td><td>Strong SCTR stocks that dropped significantly this week — mean-reversion entries at a discount.</td></tr>
+              <tr><td>📣 Social Buzz</td><td>StockTwits trending symbols cross-referenced with the SCTR scanner — hype backed by technicals.</td></tr>
+              <tr><td>📊 Sector Analysis</td><td>Sector rotation over time, avg SCTR by sector, momentum signals.</td></tr>
+              <tr><td>🔍 Stock Deep Dive</td><td>Per-stock: SCTR history, price vs MAs, volume, RSI.</td></tr>
+              <tr><td>📅 Daily History</td><td>Browse the full scanner list for any past date.</td></tr>
+              <tr><td>📄 Spec</td><td>Technical documentation of the scoring model.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Tab Nav -->
+      <nav class="tab-nav" id="tab-nav">
+        <button class="tab-btn active" data-tab="top-picks">🏆 Top Picks</button>
+        <button class="tab-btn" data-tab="swing">⚡ Swing</button>
+        <button class="tab-btn" data-tab="pullback">📉 Pullback</button>
+        <button class="tab-btn" data-tab="social">📣 Social Buzz</button>
+        <button class="tab-btn" data-tab="sectors">📊 Sectors</button>
+        <button class="tab-btn" data-tab="deep-dive">🔍 Deep Dive</button>
+        <button class="tab-btn" data-tab="history">📅 History</button>
+        <button class="tab-btn" data-tab="spec">📄 Spec</button>
+      </nav>
+
+      <!-- ── Tab: Top Picks ──────────────────────────────────────────── -->
+      <div class="tab-panel active" id="tab-top-picks">
+        <div class="panel-header">
+          <h2>🏆 Top Investment Candidates</h2>
+          <p class="panel-caption">Ranked by composite score. High conviction → green, watch-list → yellow.</p>
+        </div>
+        <div class="control-row">
+          <label class="filter-label">Show top</label>
+          <input type="range" class="slider slim" id="top-n" min="5" max="50" value="15" />
+          <span class="slider-val" id="top-n-val">15 stocks</span>
+        </div>
+        <div id="chart-top-picks" class="chart-box"></div>
+        <div class="divider"></div>
+        <div id="cards-top-picks" class="cards-grid"></div>
+      </div>
+
+      <!-- ── Tab: Short-Term Swing ──────────────────────────────────── -->
+      <div class="tab-panel" id="tab-swing" style="display:none">
+        <div class="panel-header">
+          <h2>⚡ Short-Term Swing Candidates</h2>
+          <p class="panel-caption">Today's stocks only — ranked for 1–5 day trades with ATR-based levels.</p>
+        </div>
+        <div class="control-row">
+          <label class="filter-label">Show top</label>
+          <input type="range" class="slider slim" id="swing-n" min="1" max="50" value="15" />
+          <span class="slider-val" id="swing-n-val">15 stocks</span>
+        </div>
+        <div id="chart-swing" class="chart-box"></div>
+        <div class="divider"></div>
+        <div id="cards-swing" class="cards-grid"></div>
+        <div class="expander" id="swing-table-expander">
+          <button class="expander-btn" onclick="toggleExpander('swing-full-table', this)">Full Swing Table ▼</button>
+          <div id="swing-full-table" class="expander-content" style="display:none">
+            <div id="table-swing" class="data-table-wrap"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Tab: Weekly Pullback ────────────────────────────────────── -->
+      <div class="tab-panel" id="tab-pullback" style="display:none">
+        <div class="panel-header">
+          <h2>📉 Weekly Pullback Scanner</h2>
+          <p class="panel-caption">Strong SCTR stocks in a temporary intra-week dip — mean-reversion entries.</p>
+        </div>
+        <div class="control-row">
+          <label class="filter-label">Min High→Low drop</label>
+          <input type="range" class="slider slim" id="pb-drop" min="5" max="40" value="15" />
+          <span class="slider-val" id="pb-drop-val">15%</span>
+          <button class="btn-primary" onclick="loadPullbacks()">Fetch Data</button>
+        </div>
+        <div id="pb-status" class="info-msg" style="display:none"></div>
+        <div id="chart-pb-drop" class="chart-box" style="display:none"></div>
+        <div id="chart-pb-range" class="chart-box" style="display:none"></div>
+        <div id="table-pullback" class="data-table-wrap"></div>
+      </div>
+
+      <!-- ── Tab: Social Buzz ───────────────────────────────────────── -->
+      <div class="tab-panel" id="tab-social" style="display:none">
+        <div class="panel-header">
+          <h2>📣 Social Buzz — Trending on StockTwits</h2>
+          <p class="panel-caption">Trending symbols cross-referenced with the SCTR scanner — social hype backed by technical strength.</p>
+        </div>
+        <button class="btn-primary" onclick="loadSocial()">Refresh Trending</button>
+        <div id="social-kpis" class="kpi-mini-row" style="display:none"></div>
+        <div id="chart-social" class="chart-box" style="display:none"></div>
+        <div id="cards-social" class="cards-grid"></div>
+        <div class="expander" id="social-table-expander" style="display:none">
+          <button class="expander-btn" onclick="toggleExpander('social-full-table', this)">Full Trending Table ▼</button>
+          <div id="social-full-table" class="expander-content" style="display:none">
+            <div id="table-social" class="data-table-wrap"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Tab: Sector Analysis ───────────────────────────────────── -->
+      <div class="tab-panel" id="tab-sectors" style="display:none">
+        <div class="panel-header">
+          <h2>📊 Sector Rotation Analysis</h2>
+        </div>
+        <div id="chart-sector-time" class="chart-box"></div>
+        <div class="two-col">
+          <div id="chart-sector-sctr" class="chart-box"></div>
+          <div id="chart-sector-pie" class="chart-box"></div>
+        </div>
+        <div id="chart-sector-momentum" class="chart-box"></div>
+      </div>
+
+      <!-- ── Tab: Deep Dive ─────────────────────────────────────────── -->
+      <div class="tab-panel" id="tab-deep-dive" style="display:none">
+        <div class="panel-header">
+          <h2>🔍 Stock Deep Dive</h2>
+        </div>
+        <div class="control-row">
+          <label class="filter-label">Symbol</label>
+          <select id="dd-symbol" class="select-input" onchange="renderDeepDive()"></select>
+        </div>
+        <div id="dd-summary-row" class="kpi-mini-row"></div>
+        <div id="dd-meta" class="dd-meta"></div>
+        <div id="chart-dd-sctr" class="chart-box"></div>
+        <div id="chart-dd-price" class="chart-box"></div>
+        <div id="chart-dd-volume" class="chart-box"></div>
+        <div id="chart-dd-rsi" class="chart-box"></div>
+        <div class="expander">
+          <button class="expander-btn" onclick="toggleExpander('dd-raw-table', this)">Raw Data ▼</button>
+          <div id="dd-raw-table" class="expander-content" style="display:none">
+            <div id="table-deep-dive" class="data-table-wrap"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Tab: Daily History ─────────────────────────────────────── -->
+      <div class="tab-panel" id="tab-history" style="display:none">
+        <div class="panel-header">
+          <h2>📅 Daily Scanner History</h2>
+        </div>
+        <div class="control-row">
+          <label class="filter-label">Date</label>
+          <select id="hist-date" class="select-input" onchange="renderHistory()"></select>
+        </div>
+        <div id="hist-count" class="info-msg" style="display:none"></div>
+        <div id="chart-hist-sector" class="chart-box" style="display:none"></div>
+        <div id="table-history" class="data-table-wrap"></div>
+      </div>
+
+      <!-- ── Tab: Spec ──────────────────────────────────────────────── -->
+      <div class="tab-panel" id="tab-spec" style="display:none">
+        <div class="panel-header">
+          <h2>📄 Technical Specification</h2>
+        </div>
+        <div id="spec-content" class="spec-content"></div>
+      </div>
+
+    </main>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
