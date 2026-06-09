@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
 
+# Local env
+.env.local
+.env*.local
+
 # macOS
 .DS_Store
 
@@ -20,3 +24,4 @@ env/
 2*/
 *.csv
 .vercel
+.env*
