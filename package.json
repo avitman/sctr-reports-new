@@ -1,0 +1,7 @@
+{
+  "name": "sctr-reports",
+  "version": "1.0.0",
+  "dependencies": {
+    "yahoo-finance2": "^2.11.3"
+  }
+}
