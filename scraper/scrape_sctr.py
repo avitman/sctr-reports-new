@@ -160,18 +160,24 @@ def scrape_sctr_table(exclude_earnings_days=7):
     cache = load_cache()
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        page = browser.new_page()
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
 
         try:
             page.goto("https://stockcharts.com/freecharts/sctr.html",
-                      wait_until="domcontentloaded", timeout=90000)
-            page.wait_for_selector("table tbody tr", timeout=90000)
+                      wait_until="networkidle", timeout=120000)
+            page.wait_for_selector("table tbody tr", timeout=60000)
             print("✅ Page loaded, extracting table...")
         except Exception:
             print("⚠️ First attempt failed, retrying...")
-            page.reload()
-            page.wait_for_selector("table tbody tr", timeout=90000)
+            page.reload(wait_until="networkidle", timeout=120000)
+            page.wait_for_selector("table tbody tr", timeout=60000)
 
         data = page.evaluate("""
             () => {
@@ -185,6 +191,7 @@ def scrape_sctr_table(exclude_earnings_days=7):
         """)
 
         page.close()
+        context.close()
         browser.close()
 
         headers = data[0][1:]
@@ -203,7 +210,6 @@ def scrape_sctr_table(exclude_earnings_days=7):
         for row in rows:
             try:
                 sctr_value = float(row[sctr_index]) if row[sctr_index] else 0
-                chg_value = float(row[chg_index].replace("%", "")) if row[chg_index] else 0
                 vol_value = int(row[vol_index].replace(",", "")) if row[vol_index] else 0
                 if sctr_value >= 90 and vol_value > 1_000_000:
                     filtered_rows.append(row)
