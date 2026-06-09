@@ -1,6 +1,6 @@
 # SCTR Daily Scanner
 
-Automated stock scanner that filters stocks by SCTR ≥ 90 and strict technical criteria. Runs every weekday via GitHub Actions, stores results in Supabase, and serves a live dashboard on Netlify.
+Automated stock scanner that filters stocks by SCTR ≥ 90 and strict technical criteria. Runs every weekday via GitHub Actions, stores results in Supabase, and serves a live dashboard on Vercel.
 
 ## What it does
 
@@ -19,7 +19,7 @@ Every weekday the scraper:
 | Automation | GitHub Actions (cron) |
 | Scraping | Playwright + yfinance |
 | Database | Supabase (PostgreSQL) |
-| Dashboard | Netlify (static site + serverless functions) |
+| Dashboard | Vercel (static site + serverless functions) |
 | Alerts | Telegram Bot |
 
 ## Project structure
@@ -27,16 +27,16 @@ Every weekday the scraper:
 ```
 ├── .github/workflows/daily_scan.yml   # Cron scheduler (Tue–Sat, 07:00 UTC)
 ├── scraper/scrape_sctr.py             # Main scraper
-├── site/                              # Netlify frontend
+├── site/                              # Frontend static files
 │   ├── index.html
 │   ├── style.css
 │   └── app.js
-├── netlify/functions/                 # Netlify serverless functions
+├── api/                               # Vercel serverless functions
 │   ├── config.js                      # Serves Supabase credentials to browser
 │   ├── pullbacks.js                   # Yahoo Finance weekly price proxy
-│   ├── stocktwits.js                  # StockTwits trending proxy
-│   └── package.json
-├── netlify.toml                       # Netlify build config
+│   └── stocktwits.js                  # StockTwits trending proxy
+├── package.json                       # API dependencies (yahoo-finance2)
+├── vercel.json                        # Vercel build config
 └── .gitignore
 ```
 
@@ -70,29 +70,28 @@ Go to **Settings → Secrets and variables → Actions** and add:
 | `TELEGRAM_TOKEN` | Your Telegram bot token |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat ID |
 
-### 3. Deploy to Netlify
+### 3. Deploy to Vercel
 
 1. Push this repo to GitHub
-2. Go to [app.netlify.com](https://app.netlify.com) → **Add new site → Import an existing project**
-3. Select the repo — Netlify auto-detects `netlify.toml` (publish: `site`, functions: `netlify/functions`)
-4. Go to **Site configuration → Environment variables** and add:
+2. Go to [vercel.com/new](https://vercel.com/new) → import the repo
+3. Leave the framework preset as **Other** — Vercel auto-detects `vercel.json` (output: `site`, functions: `api/`)
+4. Go to **Settings → Environment Variables** and add for Production, Preview, and Development:
 
 | Variable | Value |
 |---|---|
 | `SUPABASE_URL` | Your Supabase project URL |
 | `SUPABASE_KEY` | Your Supabase anon key |
 
-5. Trigger a redeploy — your dashboard is live at `https://your-site.netlify.app`
+5. Trigger a redeploy — your dashboard is live at `https://your-site.vercel.app`
 
 ### 4. Run locally
 
 ```bash
-python3 -m http.server 8080 --directory site/
+npm install
+vercel dev
 ```
 
-Open [http://localhost:8080](http://localhost:8080). On first load the app shows a credentials prompt — enter your Supabase URL and anon key. They are saved in `localStorage` so you only need to do this once.
-
-> The Weekly Pullback tab requires the Netlify serverless function (Yahoo Finance) and won't work in local dev.
+Open [http://localhost:3000](http://localhost:3000). The `vercel dev` command serves the static site and runs the API functions locally, matching production behavior exactly.
 
 ### 5. Manual scraper trigger
 
