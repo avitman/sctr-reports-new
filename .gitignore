@@ -16,3 +16,4 @@ env/
 # Output data (goes to Supabase, not git)
 2*/
 *.csv
+.vercel

@@ -1,4 +1,0 @@
-supabase
-pandas
-plotly
-yfinance
