@@ -1,8 +1,0 @@
-{
-  "name": "sctr-functions",
-  "version": "1.0.0",
-  "dependencies": {
-    "yahoo-finance2": "^2.11.3",
-    "node-fetch": "^3.3.2"
-  }
-}
