@@ -2,6 +2,7 @@
   "name": "sctr-reports",
   "version": "1.0.0",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1",
     "yahoo-finance2": "^2.11.3"
   }
 }

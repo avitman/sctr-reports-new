@@ -369,8 +369,9 @@ function wireFilters() {
   link('f-sctr',        'f-sctr-val',        v => v);
   link('top-n',         'top-n-val',         v => `${v} stocks`);
   link('swing-n',       'swing-n-val',       v => `${v} stocks`);
-  link('pb-drop',       'pb-drop-val',       v => `${v}%`);
-  link('pb-drop-max',   'pb-drop-max-val',   v => `${v}%`);
+  link('pb-drop',         'pb-drop-val',         v => `${v}%`);
+  link('pb-drop-max',     'pb-drop-max-val',     v => `${v}%`);
+  link('pb-recovery-max', 'pb-recovery-max-val', v => `${v}%`);
 
   document.getElementById('f-only-today').addEventListener('change', update);
   document.getElementById('f-earn-days').addEventListener('change', update);
@@ -596,8 +597,9 @@ async function fetchPullbacksFromYahoo(symbols, onProgress) {
 async function loadPullbacks() {
   const d7      = offsetDate(latestDate, -7);
   const syms    = [...new Set(allData.filter(r => r.DATE >= d7).map(r => r.SYMBOL))];
-  const minDrop = +document.getElementById('pb-drop').value;
-  const maxDrop = +document.getElementById('pb-drop-max').value;
+  const minDrop     = +document.getElementById('pb-drop').value;
+  const maxDrop     = +document.getElementById('pb-drop-max').value;
+  const maxRecovery = +document.getElementById('pb-recovery-max').value;
 
   if (!syms.length) {
     showInfoMsg('pb-status', 'No symbols in the past week.', 'warn');
@@ -607,6 +609,8 @@ async function loadPullbacks() {
   showInfoMsg('pb-status', `Fetching price data for ${syms.length} symbols…`, '');
   document.getElementById('chart-pb-drop').style.display  = 'none';
   document.getElementById('chart-pb-range').style.display = 'none';
+  document.getElementById('pb-ai-section').style.display  = 'none';
+  document.getElementById('pb-ai-cards').innerHTML        = '';
 
   try {
     let raw;
@@ -628,15 +632,15 @@ async function loadPullbacks() {
     }
 
     const pb = raw
-      .filter(r => r.DROP_PCT >= minDrop && r.DROP_PCT <= maxDrop)
+      .filter(r => r.DROP_PCT >= minDrop && r.DROP_PCT <= maxDrop && (r.RECOVERY_PCT ?? 0) <= maxRecovery)
       .map(r => {
         const sc = scores.find(s => s.SYMBOL === r.SYMBOL) || {};
         // Flag stocks where earnings likely just happened (low EARN_DAYS = post-earnings drop risk)
         const earnDays = sc.EARN_DAYS;
         const earningsFlag = earnDays != null && earnDays <= 14;
         return { ...r, LATEST_SCTR: sc.LATEST_SCTR, SECTOR: sc.SECTOR, NAME: sc.NAME,
-                 SCORE: sc.SCORE, SCTR_MOMENTUM: sc.SCTR_MOMENTUM, EARN_DAYS: earnDays,
-                 EARNINGS_FLAG: earningsFlag };
+                 SCORE: sc.SCORE, SCTR_MOMENTUM: sc.SCTR_MOMENTUM, LATEST_RSI: sc.LATEST_RSI,
+                 EARN_DAYS: earnDays, EARNINGS_FLAG: earningsFlag };
       });
 
     const excluded = raw.filter(r => r.DROP_PCT > maxDrop).length;
@@ -723,6 +727,8 @@ async function loadPullbacks() {
       FROM_HIGH_PCT: v => fmtPct(v),
       RECOVERY_PCT: v => fmtNum(v, 1) + '%',
     });
+
+    analyzeWithAI(pb);
 
   } catch (e) {
     showInfoMsg('pb-status', `Error: ${e.message}`, 'error');
@@ -1500,4 +1506,88 @@ function toggleExpander(id, btn) {
   const open = el.style.display === 'block';
   el.style.display = open ? 'none' : 'block';
   btn.textContent  = btn.textContent.replace(open ? '▲' : '▼', open ? '▼' : '▲');
+}
+
+// ── AI Pullback Analysis ───────────────────────────────────
+async function analyzeWithAI(pb) {
+  if (!pb.length) return;
+
+  const section  = document.getElementById('pb-ai-section');
+  const cardsEl  = document.getElementById('pb-ai-cards');
+  const statusEl = document.getElementById('pb-ai-status');
+
+  section.style.display = 'block';
+  statusEl.style.display = 'none';
+  cardsEl.innerHTML = '<div class="info-msg">Analyzing pullbacks with Claude…</div>';
+
+  try {
+    const res = await fetch('/api/analyze-pullbacks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stocks: pb }),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if ((err.error || '').includes('ANTHROPIC_API_KEY')) {
+        section.style.display = 'none';
+        return;
+      }
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    const { analyses } = await res.json();
+    if (!Array.isArray(analyses) || !analyses.length) throw new Error('No analyses returned');
+
+    const bySymbol = Object.fromEntries(analyses.map(a => [a.symbol, a]));
+    cardsEl.innerHTML = pb
+      .map(stock => {
+        const a = bySymbol[stock.SYMBOL];
+        return a ? pullbackAnalysisCard(stock, a) : '';
+      })
+      .join('');
+
+  } catch (e) {
+    cardsEl.innerHTML = '';
+    statusEl.style.display = 'block';
+    statusEl.className = 'info-msg warn-msg';
+    statusEl.textContent = `AI analysis unavailable: ${e.message}`;
+  }
+}
+
+function pullbackAnalysisCard(stock, analysis) {
+  const VERDICTS = {
+    BUYABLE_DIP:     { label: 'Buyable Dip',       cls: 'badge-green',  border: 'var(--green)'  },
+    ALREADY_BOUNCED: { label: 'Already Bounced',    cls: 'badge-gold',   border: 'var(--gold)'   },
+    RISKY:           { label: 'Risky / Breakdown',  cls: 'badge-red',    border: 'var(--red)'    },
+    EARNINGS_RISK:   { label: 'Earnings Risk',       cls: 'badge-orange', border: 'var(--orange)' },
+  };
+  const CONF_COLORS = { HIGH: 'var(--green)', MEDIUM: 'var(--gold)', LOW: 'var(--text-muted)' };
+
+  const v    = VERDICTS[analysis.verdict] || VERDICTS.RISKY;
+  const conf = CONF_COLORS[analysis.confidence] || CONF_COLORS.LOW;
+
+  return `
+    <div class="stock-card" style="border-left-color:${v.border}">
+      <div class="card-top">
+        <div>
+          <div class="card-symbol">${esc(stock.SYMBOL)}</div>
+          <div class="card-name">${esc(stock.NAME || '')}</div>
+          <div class="card-sector">${esc(stock.SECTOR || '')}</div>
+        </div>
+        <div style="text-align:right">
+          <span class="badge ${v.cls}" style="font-size:12px;padding:4px 10px">${esc(v.label)}</span>
+          <div style="margin-top:6px;font-size:11px;color:${conf}">${esc(analysis.confidence || '')} confidence</div>
+        </div>
+      </div>
+      <div style="color:var(--text-secondary);font-size:13px;line-height:1.55;margin-top:8px">${esc(analysis.reason || '')}</div>
+      <div class="card-badges" style="margin-top:8px">
+        ${stock.DROP_PCT    != null ? `<span class="badge badge-gray">Drop ${fmtNum(stock.DROP_PCT,1)}%</span>`     : ''}
+        ${stock.RECOVERY_PCT!= null ? `<span class="badge badge-gray">Rec. ${fmtNum(stock.RECOVERY_PCT,0)}%</span>` : ''}
+        ${stock.LATEST_SCTR != null ? `<span class="badge badge-cyan">SCTR ${fmtNum(stock.LATEST_SCTR,1)}</span>`   : ''}
+        ${stock.LATEST_RSI  != null ? rsiBadge(stock.LATEST_RSI) : ''}
+        ${stock.EARN_DAYS   != null ? earnBadge(stock.EARN_DAYS) : ''}
+      </div>
+    </div>`;
 }

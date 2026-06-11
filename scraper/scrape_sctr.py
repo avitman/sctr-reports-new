@@ -2,7 +2,8 @@ from playwright.sync_api import sync_playwright
 import yfinance as yf
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+import re
 import pandas as pd
 
 # Ensure cache file is created in the same directory as this script
@@ -154,6 +155,187 @@ def _send_telegram(token, chat_id, text):
         urllib.request.urlopen(url, data, timeout=10)
     except Exception as e:
         print(f"⚠️ Telegram error: {e}")
+
+
+def run_pullback_telegram(token, chat_id, supabase_url, supabase_key, anthropic_api_key):
+    """Fetch recent SCTR stocks, detect pullbacks, analyze with Claude, send to Telegram."""
+    try:
+        import anthropic
+        from supabase import create_client
+
+        db = create_client(supabase_url, supabase_key)
+
+        # Query last 10 calendar days (covers ~7 trading days)
+        since = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+        result = db.table("sctr_daily").select(
+            "symbol,sctr,rsi,earn_days,name,sector,run_date"
+        ).gte("run_date", since).execute()
+
+        if not result.data:
+            print("No recent SCTR data for pullback analysis.")
+            return
+
+        # Keep latest row per symbol
+        by_symbol = {}
+        for row in result.data:
+            sym = row["symbol"]
+            if sym not in by_symbol or row["run_date"] > by_symbol[sym]["run_date"]:
+                by_symbol[sym] = row
+
+        symbols = list(by_symbol.keys())
+        if not symbols:
+            return
+
+        print(f"📉 Running pullback analysis for {len(symbols)} symbols…")
+
+        # Download recent price data
+        hist = yf.download(
+            symbols, period="10d", interval="1d",
+            group_by="ticker", auto_adjust=False, progress=False
+        )
+
+        # Detect pullbacks
+        pullbacks = []
+        for sym in symbols:
+            try:
+                ohlc = hist[sym].dropna() if len(symbols) > 1 else hist.dropna()
+                if len(ohlc) < 3:
+                    continue
+
+                week_high = float(ohlc["High"].max())
+                week_low  = float(ohlc["Low"].min())
+                current   = float(ohlc["Close"].iloc[-1])
+                price_range = week_high - week_low
+
+                if price_range <= 0 or week_high <= 0:
+                    continue
+
+                drop_pct     = round(price_range / week_high * 100, 1)
+                recovery_pct = round((current - week_low) / price_range * 100, 1)
+                from_high_pct = round((current - week_high) / week_high * 100, 1)
+
+                if not (3 <= drop_pct <= 20 and recovery_pct <= 50):
+                    continue
+
+                row = by_symbol[sym]
+                raw_earn = row.get("earn_days")
+                try:
+                    earn_days = int(raw_earn) if raw_earn not in (None, "N/A", "") else None
+                except (ValueError, TypeError):
+                    earn_days = None
+                pullbacks.append({
+                    "SYMBOL":       sym,
+                    "NAME":         row.get("name", sym),
+                    "SECTOR":       row.get("sector", ""),
+                    "LATEST_SCTR":  row.get("sctr"),
+                    "LATEST_RSI":   row.get("rsi"),
+                    "DROP_PCT":     drop_pct,
+                    "RECOVERY_PCT": recovery_pct,
+                    "FROM_HIGH_PCT": from_high_pct,
+                    "EARN_DAYS":    earn_days,
+                    "EARNINGS_FLAG": earn_days is not None and earn_days <= 14,
+                })
+            except Exception as e:
+                print(f"⚠️ Pullback calc error for {sym}: {e}")
+
+        if not pullbacks:
+            print("No pullback candidates (3-20% drop, recovery ≤ 50%).")
+            return
+
+        print(f"Found {len(pullbacks)} pullback candidates, calling Claude…")
+
+        # Call Claude for analysis
+        stripped = [{
+            "symbol":        p["SYMBOL"],
+            "sctr":          p["LATEST_SCTR"],
+            "rsi":           p["LATEST_RSI"],
+            "drop_pct":      p["DROP_PCT"],
+            "recovery_pct":  p["RECOVERY_PCT"],
+            "earn_days":     p["EARN_DAYS"],
+            "earnings_flag": p["EARNINGS_FLAG"],
+        } for p in pullbacks]
+
+        prompt = (
+            "You are a technical analyst reviewing weekly pullback setups.\n\n"
+            "Metrics: drop_pct=weekly range%, recovery_pct=% of drop already recovered "
+            "(0%=still at low), sctr=technical rank≥90, rsi=14d RSI (50-70 healthy), "
+            "earnings_flag=true means earnings within 14 days.\n\n"
+            "Verdicts: BUYABLE_DIP (sctr strong, rsi 45-75, recovery<50%, no earnings), "
+            "ALREADY_BOUNCED (recovery>70%), RISKY (sctr weakening or rsi extreme), "
+            "EARNINGS_RISK (earnings_flag true).\n\n"
+            "Return ONLY a JSON array:\n"
+            '[{"symbol":"X","verdict":"BUYABLE_DIP","reason":"1 sentence.","confidence":"HIGH"}]\n\n'
+            f"Stocks:\n{json.dumps(stripped, indent=2)}"
+        )
+
+        client = anthropic.Anthropic(api_key=anthropic_api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        text = (response.content[0].text or "").strip()
+        match = re.search(r"\[[\s\S]*\]", text)
+        if not match:
+            print("⚠️ Claude did not return a JSON array.")
+            return
+
+        analyses = json.loads(match.group(0))
+
+        # Build Telegram message
+        EMOJI = {
+            "BUYABLE_DIP":     "✅",
+            "ALREADY_BOUNCED": "⏭",
+            "RISKY":           "🚫",
+            "EARNINGS_RISK":   "⚠️",
+        }
+
+        buyable = [a for a in analyses if a["verdict"] == "BUYABLE_DIP"]
+        today_str = datetime.today().strftime("%Y-%m-%d")
+
+        lines = [
+            f"🤖 <b>AI Pullback Analysis</b>",
+            f"📅 {today_str}  ·  {len(pullbacks)} candidates  ·  {len(buyable)} buyable dip{'s' if len(buyable) != 1 else ''}",
+            "",
+        ]
+
+        pb_by_sym = {p["SYMBOL"]: p for p in pullbacks}
+
+        for a in analyses:
+            sym     = a["symbol"]
+            verdict = a["verdict"]
+            emoji   = EMOJI.get(verdict, "❓")
+            conf    = a.get("confidence", "")
+            reason  = a.get("reason", "")
+            pb      = pb_by_sym.get(sym, {})
+            sctr    = pb.get("LATEST_SCTR")
+            drop    = pb.get("DROP_PCT")
+            rec     = pb.get("RECOVERY_PCT")
+
+            meta_parts = []
+            if sctr is not None: meta_parts.append(f"SCTR {sctr:.0f}")
+            if drop  is not None: meta_parts.append(f"Drop {drop:.1f}%")
+            if rec   is not None: meta_parts.append(f"Rec {rec:.0f}%")
+            meta = " · ".join(meta_parts)
+
+            if verdict == "BUYABLE_DIP":
+                lines.append(f"{emoji} <b>{sym}</b>  <i>({meta})</i>")
+                lines.append(f"{reason}")
+                lines.append("")
+            else:
+                verdict_label = verdict.replace("_", " ").title()
+                lines.append(f"{emoji} <b>{sym}</b> — {verdict_label}  <i>({meta})</i>")
+
+        message = "\n".join(lines)
+        if len(message) > 4000:
+            message = message[:4000] + "\n…"
+
+        _send_telegram(token, chat_id, message)
+        print(f"✅ Sent AI pullback analysis to Telegram ({len(buyable)} buyable dips)")
+
+    except Exception as e:
+        print(f"⚠️ Pullback Telegram analysis failed: {e}")
 
 
 def scrape_sctr_table(exclude_earnings_days=7):
@@ -334,6 +516,10 @@ def scrape_sctr_table(exclude_earnings_days=7):
                 f"📊 <b>{count} stocks</b> passed all filters\n"
                 f"🏆 Top 5: <code>{top5}</code>"
             )
+
+            anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if anthropic_key and supabase_url and supabase_key:
+                run_pullback_telegram(token, chat_id, supabase_url, supabase_key, anthropic_key)
 
 if __name__ == "__main__":
     try:

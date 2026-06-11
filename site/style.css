@@ -607,6 +607,7 @@ body::after {
 .badge-red    { background: rgba(255,71,87,0.12); color: var(--red);    border: 1px solid rgba(255,71,87,0.25); }
 .badge-cyan   { background: rgba(0,212,255,0.10); color: var(--cyan);   border: 1px solid rgba(0,212,255,0.2); }
 .badge-gray   { background: rgba(100,120,140,0.15); color: var(--text-secondary); border: 1px solid rgba(100,120,140,0.25); }
+.badge-orange { background: rgba(255,140,66,0.12);  color: var(--orange);         border: 1px solid rgba(255,140,66,0.25); }
 
 .trade-levels {
   margin-top: 8px;

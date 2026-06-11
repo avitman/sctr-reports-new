@@ -238,6 +238,9 @@
           <label class="filter-label" style="margin-left:12px">Max drop</label>
           <input type="range" class="slider slim" id="pb-drop-max" min="5" max="60" value="20" />
           <span class="slider-val" id="pb-drop-max-val">20%</span>
+          <label class="filter-label" style="margin-left:12px">Max recovery</label>
+          <input type="range" class="slider slim" id="pb-recovery-max" min="10" max="100" value="50" />
+          <span class="slider-val" id="pb-recovery-max-val">50%</span>
           <button class="btn-primary" onclick="loadPullbacks()">Fetch Data</button>
         </div>
         <div class="info-msg" style="display:block;margin-bottom:12px">
@@ -249,6 +252,15 @@
         <div id="chart-pb-drop" class="chart-box" style="display:none"></div>
         <div id="chart-pb-range" class="chart-box" style="display:none"></div>
         <div id="table-pullback" class="data-table-wrap"></div>
+
+        <div id="pb-ai-section" style="display:none;margin-top:28px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;border-top:1px solid rgba(26,58,92,0.5);padding-top:20px">
+            <h3 style="margin:0;color:var(--cyan);font-size:15px;font-weight:600">AI Pullback Analysis</h3>
+            <span style="color:var(--text-muted);font-size:11px;opacity:0.7">Powered by Claude</span>
+            <div id="pb-ai-status" class="info-msg" style="display:none;margin:0;padding:5px 10px;font-size:12px"></div>
+          </div>
+          <div id="pb-ai-cards" class="cards-grid"></div>
+        </div>
       </div>
 
       <!-- ── Tab: Social Buzz ───────────────────────────────────────── -->
