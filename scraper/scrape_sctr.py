@@ -164,19 +164,22 @@ def _fetch_tv_pullbacks(symbols):
     tickers   = [f"{ex}:{sym}" for sym in symbols for ex in exchanges]
     columns   = ["close", "High.5D", "Low.5D", "change", "RSI", "Recommend.All"]
 
+    print(f"🔍 _fetch_tv_pullbacks: requesting {len(symbols)} symbols → {len(tickers)} tickers")
     payload = json.dumps({"symbols": {"tickers": tickers}, "columns": columns}).encode()
     req = urlreq.Request(
         "https://scanner.tradingview.com/america/scan",
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "User-Agent":   "Mozilla/5.0",
+            "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Origin":       "https://www.tradingview.com",
             "Referer":      "https://www.tradingview.com/",
         },
     )
-    with urlreq.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read())
+    with urlreq.urlopen(req, timeout=30) as resp:
+        raw = resp.read()
+        data = json.loads(raw)
+        print(f"✅ TradingView returned {len(data.get('data', []))} rows")
 
     seen, results = set(), {}
     for item in data.get("data", []):
@@ -335,6 +338,7 @@ def run_pullback_telegram(token, chat_id, supabase_url, supabase_key, anthropic_
             f"Stocks:\n{json.dumps(stripped, indent=2)}"
         )
 
+        print(f"🤖 Calling Claude for {len(stripped)} stocks…")
         client = anthropic.Anthropic(api_key=anthropic_api_key)
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -343,6 +347,7 @@ def run_pullback_telegram(token, chat_id, supabase_url, supabase_key, anthropic_
         )
 
         text  = (response.content[0].text or "").strip()
+        print(f"📝 Claude raw response (first 500 chars): {text[:500]}")
         match = re.search(r"\[[\s\S]*\]", text)
         if not match:
             print("⚠️ Claude did not return a JSON array.")
@@ -351,6 +356,7 @@ def run_pullback_telegram(token, chat_id, supabase_url, supabase_key, anthropic_
         analyses   = json.loads(match.group(0))
         pb_by_sym  = {p["SYMBOL"]: p for p in pullbacks}
         buyable    = [a for a in analyses if a["verdict"] == "BUYABLE_DIP"]
+        print(f"📊 Verdicts: {[(a['symbol'], a['verdict']) for a in analyses]}")
         today_str  = datetime.today().strftime("%Y-%m-%d")
 
         EMOJI = {
@@ -405,7 +411,9 @@ def run_pullback_telegram(token, chat_id, supabase_url, supabase_key, anthropic_
         print(f"✅ Sent AI pullback analysis to Telegram ({len(buyable)} buyable dips)")
 
     except Exception as e:
+        import traceback
         print(f"⚠️ Pullback Telegram analysis failed: {e}")
+        traceback.print_exc()
 
 
 def scrape_sctr_table(exclude_earnings_days=7):
