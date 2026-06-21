@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
 </head>
 <body>
 
@@ -228,7 +229,13 @@
       <!-- ── Tab: Weekly Pullback ────────────────────────────────────── -->
       <div class="tab-panel" id="tab-pullback" style="display:none">
         <div class="panel-header">
-          <h2>📉 Weekly Pullback Scanner</h2>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <h2 style="margin-bottom:0">📉 Weekly Pullback Scanner</h2>
+            <a href="https://www.tradingview.com" target="_blank" rel="noopener" class="tv-source-badge" title="Price data powered by TradingView">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style="flex-shrink:0"><path d="M3 3h18v4H3zm0 7h10v4H3zm0 7h14v4H3z"/></svg>
+              Data: TradingView
+            </a>
+          </div>
           <p class="panel-caption">Strong SCTR stocks in a temporary intra-week dip — mean-reversion entries.</p>
         </div>
         <div class="control-row">
@@ -340,6 +347,52 @@
       </div>
 
     </main>
+  </div>
+</div>
+
+<!-- ── AI Chat Bubble ────────────────────────────────────────────── -->
+<button id="chat-toggle" class="chat-toggle-btn" title="Ask AI Analyst" aria-label="Open AI chat">
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+  </svg>
+</button>
+
+<!-- ── AI Chat Panel ─────────────────────────────────────────────── -->
+<div id="chat-panel" class="chat-panel" role="dialog" aria-label="AI Market Analyst">
+  <div class="chat-header">
+    <div class="chat-header-info">
+      <div class="chat-header-dot"></div>
+      <div>
+        <div class="chat-header-title">AI Market Analyst</div>
+        <div class="chat-header-sub">TradingView · Live Data</div>
+      </div>
+    </div>
+    <button class="chat-close-btn" id="chat-close" aria-label="Close chat">×</button>
+  </div>
+
+  <div id="chat-messages" class="chat-messages">
+    <div class="chat-msg chat-msg-assistant">
+      <div class="chat-bubble">
+        Ask me about any stock — I'll pull live TradingView data and show you a chart.<br><br>
+        <em>Try: "Analyze NVDA" or "Is AAPL a buy right now?"</em>
+      </div>
+    </div>
+  </div>
+
+  <div class="chat-input-area">
+    <textarea
+      id="chat-input"
+      class="chat-textarea"
+      placeholder="Ask about a stock…"
+      rows="1"
+      maxlength="500"
+    ></textarea>
+    <button id="chat-send" class="chat-send-btn" aria-label="Send">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="22" y1="2" x2="11" y2="13"/>
+        <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+      </svg>
+    </button>
   </div>
 </div>
 

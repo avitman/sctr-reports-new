@@ -528,66 +528,61 @@ function renderSwing() {
 }
 
 // ── Yahoo Finance browser fallback ────────────────────────
-async function fetchSymbolYahoo(sym) {
-  const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d&includePrePost=false`;
+async function fetchPullbacksFromTV(symbols) {
+  const EXCHANGES  = ['NASDAQ', 'NYSE', 'AMEX'];
+  const TV_COLUMNS = ['close', 'High.5D', 'Low.5D', 'change', 'volume', 'RSI', 'Recommend.All'];
+  const tickers    = symbols.flatMap(s => EXCHANGES.map(ex => `${ex}:${s}`));
 
-  // Try direct fetch first
-  try {
-    const r = await fetch(chartUrl, { signal: AbortSignal.timeout(6000), headers: { Accept: 'application/json' } });
-    if (r.ok) return await r.json();
-  } catch {}
+  const resp = await fetch('https://scanner.tradingview.com/america/scan', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ symbols: { tickers }, columns: TV_COLUMNS }),
+    signal:  AbortSignal.timeout(15000),
+  });
 
-  // CORS proxy fallback (for local dev)
-  const proxies = [
-    `https://corsproxy.io/?${encodeURIComponent(chartUrl)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(chartUrl)}`,
-  ];
-  for (const proxy of proxies) {
-    try {
-      const r = await fetch(proxy, { signal: AbortSignal.timeout(10000) });
-      if (r.ok) return await r.json();
-    } catch {}
-  }
-  return null;
-}
+  if (!resp.ok) throw new Error(`TradingView scanner ${resp.status}`);
+  const rows = (await resp.json()).data || [];
 
-async function fetchPullbacksFromYahoo(symbols, onProgress) {
+  const seen    = new Set();
   const results = [];
-  const CONCURRENCY = 6;
-  let done = 0;
 
-  for (let i = 0; i < symbols.length; i += CONCURRENCY) {
-    const batch = symbols.slice(i, i + CONCURRENCY);
-    await Promise.all(batch.map(async sym => {
-      try {
-        const data   = await fetchSymbolYahoo(sym);
-        const result = data?.chart?.result?.[0];
-        if (!result) return;
+  for (const item of rows) {
+    const d      = item.d;
+    const close  = d?.[0];
+    const wkHigh = d?.[1];
+    const wkLow  = d?.[2];
+    if (!close || !wkHigh || !wkLow) continue;
 
-        const q      = result.indicators.quote[0];
-        const highs  = (q.high  || []).filter(v => v != null);
-        const lows   = (q.low   || []).filter(v => v != null);
-        const closes = (q.close || []).filter(v => v != null);
-        if (!highs.length || !lows.length || !closes.length) return;
+    const baseSym = item.s.split(':')[1];
+    if (seen.has(baseSym)) continue;
+    seen.add(baseSym);
 
-        const weekHigh   = Math.max(...highs);
-        const weekLow    = Math.min(...lows);
-        const current    = closes[closes.length - 1];
-        const priceRange = weekHigh - weekLow;
+    const change  = d?.[3];
+    const rsi     = d?.[5];
+    const recRaw  = d?.[6];
+    const priceRange = wkHigh - wkLow;
 
-        results.push({
-          SYMBOL:        sym,
-          WEEK_HIGH:     round2(weekHigh),
-          WEEK_LOW:      round2(weekLow),
-          CURRENT:       round2(current),
-          DROP_PCT:      Math.round(priceRange / weekHigh * 1000) / 10,
-          FROM_HIGH_PCT: Math.round((current - weekHigh) / weekHigh * 1000) / 10,
-          RECOVERY_PCT:  priceRange > 0 ? Math.round((current - weekLow) / priceRange * 1000) / 10 : 50,
-        });
-      } catch { /* skip symbol */ }
-      done++;
-      if (onProgress) onProgress(done, symbols.length, results.length);
-    }));
+    let tvSignal = null;
+    if (recRaw != null) {
+      if      (recRaw >= 0.5)  tvSignal = 'Strong Buy';
+      else if (recRaw >= 0.1)  tvSignal = 'Buy';
+      else if (recRaw > -0.1)  tvSignal = 'Neutral';
+      else if (recRaw > -0.5)  tvSignal = 'Sell';
+      else                     tvSignal = 'Strong Sell';
+    }
+
+    results.push({
+      SYMBOL:        baseSym,
+      WEEK_HIGH:     round2(wkHigh),
+      WEEK_LOW:      round2(wkLow),
+      CURRENT:       round2(close),
+      CHANGE_PCT:    change != null ? Math.round(change * 10) / 10 : null,
+      DROP_PCT:      Math.round(priceRange / wkHigh * 1000) / 10,
+      FROM_HIGH_PCT: Math.round((close - wkHigh) / wkHigh * 1000) / 10,
+      RECOVERY_PCT:  priceRange > 0 ? Math.round((close - wkLow) / priceRange * 1000) / 10 : 50,
+      TV_RSI:        rsi != null ? Math.round(rsi * 10) / 10 : null,
+      TV_SIGNAL:     tvSignal,
+    });
   }
 
   return results.sort((a, b) => b.DROP_PCT - a.DROP_PCT);
@@ -620,13 +615,11 @@ async function loadPullbacks() {
     if (res.ok) {
       raw = await res.json();
     } else {
-      // Fallback: fetch Yahoo Finance chart API directly from the browser
-      showInfoMsg('pb-status', `Fetching from Yahoo Finance (0 / ${syms.length} symbols)…`, '');
-      raw = await fetchPullbacksFromYahoo(syms, (done, total, found) => {
-        showInfoMsg('pb-status', `Fetching from Yahoo Finance (${done} / ${total} symbols, ${found} with data)…`, '');
-      });
+      // Fallback: call TradingView scanner directly from the browser
+      showInfoMsg('pb-status', `Fetching from TradingView (${syms.length} symbols)…`, '');
+      raw = await fetchPullbacksFromTV(syms);
       if (!raw.length) {
-        showInfoMsg('pb-status', 'Yahoo Finance returned no data — possibly CORS-blocked in this browser. Try deploying to Netlify.', 'warn');
+        showInfoMsg('pb-status', 'TradingView returned no data. Try refreshing.', 'warn');
         return;
       }
     }
@@ -717,15 +710,18 @@ async function loadPullbacks() {
     }, plotlyConfig());
 
     document.getElementById('table-pullback').innerHTML = buildTable(pb, [
-      'SYMBOL','NAME','SECTOR','WEEK_HIGH','WEEK_LOW','CURRENT',
-      'DROP_PCT','FROM_HIGH_PCT','RECOVERY_PCT','LATEST_SCTR','SCTR_MOMENTUM','EARN_DAYS',
+      'SYMBOL','NAME','SECTOR','CURRENT','CHANGE_PCT','WEEK_HIGH','WEEK_LOW',
+      'DROP_PCT','FROM_HIGH_PCT','RECOVERY_PCT','TV_RSI','TV_SIGNAL','LATEST_SCTR','SCTR_MOMENTUM','EARN_DAYS',
     ], {
-      WEEK_HIGH: v => fmtDollar(v),
-      WEEK_LOW: v => fmtDollar(v),
-      CURRENT: v => fmtDollar(v),
-      DROP_PCT: v => fmtPct(v),
+      CURRENT:       v => fmtDollar(v),
+      CHANGE_PCT:    v => v == null ? '—' : (v > 0 ? '+' : '') + fmtNum(v, 1) + '%',
+      WEEK_HIGH:     v => fmtDollar(v),
+      WEEK_LOW:      v => fmtDollar(v),
+      DROP_PCT:      v => fmtPct(v),
       FROM_HIGH_PCT: v => fmtPct(v),
-      RECOVERY_PCT: v => fmtNum(v, 1) + '%',
+      RECOVERY_PCT:  v => fmtNum(v, 1) + '%',
+      TV_RSI:        v => v == null ? '—' : fmtNum(v, 1),
+      TV_SIGNAL:     v => v || '—',
     });
 
     analyzeWithAI(pb);
@@ -1558,15 +1554,37 @@ async function analyzeWithAI(pb) {
 
 function pullbackAnalysisCard(stock, analysis) {
   const VERDICTS = {
-    BUYABLE_DIP:     { label: 'Buyable Dip',       cls: 'badge-green',  border: 'var(--green)'  },
-    ALREADY_BOUNCED: { label: 'Already Bounced',    cls: 'badge-gold',   border: 'var(--gold)'   },
-    RISKY:           { label: 'Risky / Breakdown',  cls: 'badge-red',    border: 'var(--red)'    },
-    EARNINGS_RISK:   { label: 'Earnings Risk',       cls: 'badge-orange', border: 'var(--orange)' },
+    BUYABLE_DIP:     { label: 'Buyable Dip',      cls: 'badge-green',  border: 'var(--green)'  },
+    ALREADY_BOUNCED: { label: 'Already Bounced',   cls: 'badge-gold',   border: 'var(--gold)'   },
+    RISKY:           { label: 'Risky / Breakdown', cls: 'badge-red',    border: 'var(--red)'    },
+    EARNINGS_RISK:   { label: 'Earnings Risk',      cls: 'badge-orange', border: 'var(--orange)' },
   };
   const CONF_COLORS = { HIGH: 'var(--green)', MEDIUM: 'var(--gold)', LOW: 'var(--text-muted)' };
 
   const v    = VERDICTS[analysis.verdict] || VERDICTS.RISKY;
   const conf = CONF_COLORS[analysis.confidence] || CONF_COLORS.LOW;
+
+  const tvSignalColor = {
+    'Strong Buy': 'var(--green)', 'Buy': 'var(--green)',
+    'Neutral': 'var(--gold)',
+    'Sell': 'var(--red)', 'Strong Sell': 'var(--red)',
+  }[stock.TV_SIGNAL] || 'var(--text-muted)';
+
+  const entryStopTarget = (analysis.entry || analysis.stop || analysis.target) ? `
+    <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+      ${analysis.entry  ? `<div style="flex:1;min-width:80px;background:rgba(0,255,136,0.07);border:1px solid rgba(0,255,136,0.2);border-radius:6px;padding:7px 10px;text-align:center">
+        <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px">Entry</div>
+        <div style="font-size:13px;font-weight:600;color:var(--green);font-family:var(--font-mono)">${esc(analysis.entry)}</div>
+      </div>` : ''}
+      ${analysis.stop   ? `<div style="flex:1;min-width:80px;background:rgba(255,71,87,0.07);border:1px solid rgba(255,71,87,0.2);border-radius:6px;padding:7px 10px;text-align:center">
+        <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px">Stop</div>
+        <div style="font-size:13px;font-weight:600;color:var(--red);font-family:var(--font-mono)">${esc(analysis.stop)}</div>
+      </div>` : ''}
+      ${analysis.target ? `<div style="flex:1;min-width:80px;background:rgba(0,212,255,0.07);border:1px solid rgba(0,212,255,0.2);border-radius:6px;padding:7px 10px;text-align:center">
+        <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px">Target</div>
+        <div style="font-size:13px;font-weight:600;color:var(--cyan);font-family:var(--font-mono)">${esc(analysis.target)}</div>
+      </div>` : ''}
+    </div>` : '';
 
   return `
     <div class="stock-card" style="border-left-color:${v.border}">
@@ -1581,13 +1599,220 @@ function pullbackAnalysisCard(stock, analysis) {
           <div style="margin-top:6px;font-size:11px;color:${conf}">${esc(analysis.confidence || '')} confidence</div>
         </div>
       </div>
-      <div style="color:var(--text-secondary);font-size:13px;line-height:1.55;margin-top:8px">${esc(analysis.reason || '')}</div>
-      <div class="card-badges" style="margin-top:8px">
-        ${stock.DROP_PCT    != null ? `<span class="badge badge-gray">Drop ${fmtNum(stock.DROP_PCT,1)}%</span>`     : ''}
+      <div style="color:var(--text-secondary);font-size:13px;line-height:1.6;margin-top:10px">${esc(analysis.reason || '')}</div>
+      ${entryStopTarget}
+      <div class="card-badges" style="margin-top:10px">
+        ${stock.CURRENT     != null ? `<span class="badge badge-gray">$${fmtNum(stock.CURRENT,2)}</span>`            : ''}
+        ${stock.DROP_PCT    != null ? `<span class="badge badge-gray">Drop ${fmtNum(stock.DROP_PCT,1)}%</span>`      : ''}
         ${stock.RECOVERY_PCT!= null ? `<span class="badge badge-gray">Rec. ${fmtNum(stock.RECOVERY_PCT,0)}%</span>` : ''}
         ${stock.LATEST_SCTR != null ? `<span class="badge badge-cyan">SCTR ${fmtNum(stock.LATEST_SCTR,1)}</span>`   : ''}
-        ${stock.LATEST_RSI  != null ? rsiBadge(stock.LATEST_RSI) : ''}
+        ${stock.TV_RSI      != null ? `<span class="badge badge-gray">RSI ${fmtNum(stock.TV_RSI,1)}</span>`         : ''}
+        ${stock.TV_SIGNAL   != null ? `<span class="badge" style="background:rgba(0,0,0,0.2);border:1px solid ${tvSignalColor};color:${tvSignalColor}">${esc(stock.TV_SIGNAL)}</span>` : ''}
         ${stock.EARN_DAYS   != null ? earnBadge(stock.EARN_DAYS) : ''}
       </div>
     </div>`;
 }
+
+// ── AI Chat ────────────────────────────────────────────────
+
+(function initChat() {
+  const CHAT_HISTORY_MAX = 20; // messages kept in context
+
+  let chatOpen    = false;
+  let chatLoading = false;
+  let chatHistory = []; // [{role, content}] sent to API
+
+  const toggleBtn  = document.getElementById('chat-toggle');
+  const panel      = document.getElementById('chat-panel');
+  const closeBtn   = document.getElementById('chat-close');
+  const messagesEl = document.getElementById('chat-messages');
+  const inputEl    = document.getElementById('chat-input');
+  const sendBtn    = document.getElementById('chat-send');
+
+  if (!toggleBtn || !panel) return; // elements not in DOM yet
+
+  // Open / close
+  function openChat() {
+    chatOpen = true;
+    panel.classList.add('chat-panel-open');
+    toggleBtn.classList.add('chat-open');
+    inputEl.focus();
+    scrollToBottom();
+  }
+  function closeChat() {
+    chatOpen = false;
+    panel.classList.remove('chat-panel-open');
+    toggleBtn.classList.remove('chat-open');
+  }
+
+  toggleBtn.addEventListener('click', () => chatOpen ? closeChat() : openChat());
+  closeBtn.addEventListener('click', closeChat);
+
+  // Send on Enter (Shift+Enter = newline)
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+  sendBtn.addEventListener('click', sendMessage);
+
+  // Auto-grow textarea
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 100) + 'px';
+  });
+
+  function scrollToBottom() {
+    requestAnimationFrame(() => {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    });
+  }
+
+  // Render a markdown string to safe HTML using marked.js
+  function renderMarkdown(text) {
+    if (typeof marked === 'undefined') return esc(text).replace(/\n/g, '<br>');
+    return marked.parse(text, { breaks: true, gfm: true });
+  }
+
+  function appendMessage(role, htmlContent) {
+    const wrapper = document.createElement('div');
+    wrapper.className = `chat-msg chat-msg-${role}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble';
+    bubble.innerHTML = htmlContent;
+    wrapper.appendChild(bubble);
+    messagesEl.appendChild(wrapper);
+    scrollToBottom();
+    return bubble;
+  }
+
+  function appendTyping() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'chat-msg chat-msg-assistant';
+    wrapper.id = 'chat-typing-indicator';
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble chat-typing';
+    bubble.innerHTML = '<span></span><span></span><span></span>';
+    wrapper.appendChild(bubble);
+    messagesEl.appendChild(wrapper);
+    scrollToBottom();
+    return wrapper;
+  }
+
+  function removeTyping() {
+    const el = document.getElementById('chat-typing-indicator');
+    if (el) el.remove();
+  }
+
+  // Embed a TradingView chart widget dynamically
+  function appendTVChart(parentBubble, symbol, interval) {
+    const chartContainer = document.createElement('div');
+    chartContainer.className = 'chat-tv-chart';
+
+    const widgetWrap = document.createElement('div');
+    widgetWrap.className = 'tradingview-widget-container';
+    widgetWrap.style.width = '100%';
+    widgetWrap.style.height = '100%';
+
+    const widgetDiv = document.createElement('div');
+    widgetDiv.className = 'tradingview-widget-container__widget';
+    widgetDiv.style.width = '100%';
+    widgetDiv.style.height = '100%';
+    widgetWrap.appendChild(widgetDiv);
+
+    const script = document.createElement('script');
+    script.type = 'text/javascript';
+    script.async = true;
+    script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+    script.text = JSON.stringify({
+      autosize: true,
+      symbol: symbol,
+      interval: interval || 'D',
+      timezone: 'Etc/UTC',
+      theme: 'dark',
+      style: '1',
+      locale: 'en',
+      hide_top_toolbar: true,
+      hide_legend: false,
+      save_image: false,
+      allow_symbol_change: false,
+      support_host: 'https://www.tradingview.com',
+    });
+    widgetWrap.appendChild(script);
+    chartContainer.appendChild(widgetWrap);
+    parentBubble.appendChild(chartContainer);
+    scrollToBottom();
+  }
+
+  // Build context snapshot from current dashboard state (top 10 by SCTR)
+  function buildContext() {
+    if (!scores || !scores.length) return null;
+    const top = scores.slice(0, 10).map(s => ({
+      symbol: s.SYMBOL,
+      name:   s.NAME,
+      sector: s.SECTOR,
+      sctr:   s.LATEST_SCTR,
+    }));
+    return { as_of: latestDate, top_sctr_stocks: top };
+  }
+
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text || chatLoading) return;
+
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    chatLoading = true;
+    sendBtn.disabled = true;
+
+    appendMessage('user', esc(text).replace(/\n/g, '<br>'));
+
+    chatHistory.push({ role: 'user', content: text });
+    if (chatHistory.length > CHAT_HISTORY_MAX) chatHistory.splice(0, 2);
+
+    const typingEl = appendTyping();
+
+    try {
+      const payload = {
+        messages: chatHistory,
+        context: buildContext(),
+      };
+
+      const resp = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      removeTyping();
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: 'Server error' }));
+        appendMessage('assistant', `<em style="color:var(--red)">${esc(err.error || 'Something went wrong')}</em>`);
+        chatHistory.pop(); // remove the user turn that failed
+        return;
+      }
+
+      const data = await resp.json();
+      const answerText = data.text || '';
+      const charts     = data.charts || [];
+
+      const bubble = appendMessage('assistant', renderMarkdown(answerText));
+
+      // Add TradingView charts requested by the model
+      for (const chart of charts) {
+        appendTVChart(bubble, chart.symbol, chart.interval);
+      }
+
+      chatHistory.push({ role: 'assistant', content: answerText });
+      if (chatHistory.length > CHAT_HISTORY_MAX) chatHistory.splice(0, 2);
+
+    } catch (e) {
+      removeTyping();
+      appendMessage('assistant', `<em style="color:var(--red)">Network error: ${esc(e.message)}</em>`);
+      chatHistory.pop();
+    } finally {
+      chatLoading = false;
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+})();

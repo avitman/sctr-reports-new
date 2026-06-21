@@ -157,25 +157,83 @@ def _send_telegram(token, chat_id, text):
         print(f"⚠️ Telegram error: {e}")
 
 
+def _fetch_tv_pullbacks(symbols):
+    """Fetch 5-day price range + RSI + TV signal from TradingView scanner."""
+    import urllib.request as urlreq
+    exchanges = ["NASDAQ", "NYSE", "AMEX"]
+    tickers   = [f"{ex}:{sym}" for sym in symbols for ex in exchanges]
+    columns   = ["close", "High.5D", "Low.5D", "change", "RSI", "Recommend.All"]
+
+    payload = json.dumps({"symbols": {"tickers": tickers}, "columns": columns}).encode()
+    req = urlreq.Request(
+        "https://scanner.tradingview.com/america/scan",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent":   "Mozilla/5.0",
+            "Origin":       "https://www.tradingview.com",
+            "Referer":      "https://www.tradingview.com/",
+        },
+    )
+    with urlreq.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+
+    seen, results = set(), {}
+    for item in data.get("data", []):
+        d       = item.get("d", [])
+        close   = d[0] if len(d) > 0 else None
+        wk_high = d[1] if len(d) > 1 else None
+        wk_low  = d[2] if len(d) > 2 else None
+        change  = d[3] if len(d) > 3 else None
+        rsi     = d[4] if len(d) > 4 else None
+        rec_raw = d[5] if len(d) > 5 else None
+
+        if not close or not wk_high or not wk_low:
+            continue
+        base = item["s"].split(":")[1]
+        if base in seen:
+            continue
+        seen.add(base)
+
+        if   rec_raw is None:    tv_signal = None
+        elif rec_raw >= 0.5:     tv_signal = "Strong Buy"
+        elif rec_raw >= 0.1:     tv_signal = "Buy"
+        elif rec_raw > -0.1:     tv_signal = "Neutral"
+        elif rec_raw > -0.5:     tv_signal = "Sell"
+        else:                    tv_signal = "Strong Sell"
+
+        pr = wk_high - wk_low
+        results[base] = {
+            "current":      round(close,   2),
+            "week_high":    round(wk_high, 2),
+            "week_low":     round(wk_low,  2),
+            "change_pct":   round(change,  1) if change is not None else None,
+            "tv_rsi":       round(rsi,     1) if rsi    is not None else None,
+            "tv_signal":    tv_signal,
+            "drop_pct":     round(pr / wk_high * 100, 1) if wk_high > 0 else 0,
+            "recovery_pct": round((close - wk_low) / pr * 100, 1) if pr > 0 else 50,
+            "from_high_pct": round((close - wk_high) / wk_high * 100, 1),
+        }
+    return results
+
+
 def run_pullback_telegram(token, chat_id, supabase_url, supabase_key, anthropic_api_key):
-    """Fetch recent SCTR stocks, detect pullbacks, analyze with Claude, send to Telegram."""
+    """Fetch recent SCTR stocks, detect pullbacks via TradingView, analyze with Claude, send to Telegram."""
     try:
         import anthropic
         from supabase import create_client
 
         db = create_client(supabase_url, supabase_key)
 
-        # Query last 10 calendar days (covers ~7 trading days)
         since = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
         result = db.table("sctr_daily").select(
-            "symbol,sctr,rsi,earn_days,name,sector,run_date"
+            "symbol,sctr,sctr_chg,earn_days,name,sector,run_date"
         ).gte("run_date", since).execute()
 
         if not result.data:
             print("No recent SCTR data for pullback analysis.")
             return
 
-        # Keep latest row per symbol
         by_symbol = {}
         for row in result.data:
             sym = row["symbol"]
@@ -186,85 +244,94 @@ def run_pullback_telegram(token, chat_id, supabase_url, supabase_key, anthropic_
         if not symbols:
             return
 
-        print(f"📉 Running pullback analysis for {len(symbols)} symbols…")
+        print(f"📉 Fetching TradingView data for {len(symbols)} symbols…")
+        tv_data = _fetch_tv_pullbacks(symbols)
 
-        # Download recent price data
-        hist = yf.download(
-            symbols, period="10d", interval="1d",
-            group_by="ticker", auto_adjust=False, progress=False
-        )
-
-        # Detect pullbacks
+        # Detect pullbacks (3–20% drop, recovery ≤ 50%)
         pullbacks = []
-        for sym in symbols:
+        for sym, tv in tv_data.items():
+            drop = tv["drop_pct"]
+            rec  = tv["recovery_pct"]
+            if not (3 <= drop <= 20 and rec <= 50):
+                continue
+
+            row = by_symbol.get(sym, {})
+            raw_earn = row.get("earn_days")
             try:
-                ohlc = hist[sym].dropna() if len(symbols) > 1 else hist.dropna()
-                if len(ohlc) < 3:
-                    continue
+                earn_days = int(raw_earn) if raw_earn not in (None, "N/A", "") else None
+            except (ValueError, TypeError):
+                earn_days = None
 
-                week_high = float(ohlc["High"].max())
-                week_low  = float(ohlc["Low"].min())
-                current   = float(ohlc["Close"].iloc[-1])
-                price_range = week_high - week_low
-
-                if price_range <= 0 or week_high <= 0:
-                    continue
-
-                drop_pct     = round(price_range / week_high * 100, 1)
-                recovery_pct = round((current - week_low) / price_range * 100, 1)
-                from_high_pct = round((current - week_high) / week_high * 100, 1)
-
-                if not (3 <= drop_pct <= 20 and recovery_pct <= 50):
-                    continue
-
-                row = by_symbol[sym]
-                raw_earn = row.get("earn_days")
-                try:
-                    earn_days = int(raw_earn) if raw_earn not in (None, "N/A", "") else None
-                except (ValueError, TypeError):
-                    earn_days = None
-                pullbacks.append({
-                    "SYMBOL":       sym,
-                    "NAME":         row.get("name", sym),
-                    "SECTOR":       row.get("sector", ""),
-                    "LATEST_SCTR":  row.get("sctr"),
-                    "LATEST_RSI":   row.get("rsi"),
-                    "DROP_PCT":     drop_pct,
-                    "RECOVERY_PCT": recovery_pct,
-                    "FROM_HIGH_PCT": from_high_pct,
-                    "EARN_DAYS":    earn_days,
-                    "EARNINGS_FLAG": earn_days is not None and earn_days <= 14,
-                })
-            except Exception as e:
-                print(f"⚠️ Pullback calc error for {sym}: {e}")
+            pullbacks.append({
+                "SYMBOL":        sym,
+                "NAME":          row.get("name", sym),
+                "SECTOR":        row.get("sector", ""),
+                "LATEST_SCTR":   row.get("sctr"),
+                "SCTR_MOMENTUM": row.get("sctr_chg"),
+                "CURRENT":       tv["current"],
+                "WEEK_HIGH":     tv["week_high"],
+                "WEEK_LOW":      tv["week_low"],
+                "CHANGE_PCT":    tv["change_pct"],
+                "DROP_PCT":      drop,
+                "RECOVERY_PCT":  rec,
+                "FROM_HIGH_PCT": tv["from_high_pct"],
+                "TV_RSI":        tv["tv_rsi"],
+                "TV_SIGNAL":     tv["tv_signal"],
+                "EARN_DAYS":     earn_days,
+                "EARNINGS_FLAG": earn_days is not None and earn_days <= 14,
+            })
 
         if not pullbacks:
-            print("No pullback candidates (3-20% drop, recovery ≤ 50%).")
+            print("No pullback candidates (3–20% drop, recovery ≤ 50%).")
             return
 
         print(f"Found {len(pullbacks)} pullback candidates, calling Claude…")
 
-        # Call Claude for analysis
         stripped = [{
             "symbol":        p["SYMBOL"],
-            "sctr":          p["LATEST_SCTR"],
-            "rsi":           p["LATEST_RSI"],
+            "name":          p["NAME"],
+            "sector":        p["SECTOR"],
+            "current":       p["CURRENT"],
+            "week_high":     p["WEEK_HIGH"],
+            "week_low":      p["WEEK_LOW"],
+            "change_pct":    p["CHANGE_PCT"],
             "drop_pct":      p["DROP_PCT"],
             "recovery_pct":  p["RECOVERY_PCT"],
+            "from_high_pct": p["FROM_HIGH_PCT"],
+            "sctr":          p["LATEST_SCTR"],
+            "sctr_momentum": p["SCTR_MOMENTUM"],
+            "tv_rsi":        p["TV_RSI"],
+            "tv_signal":     p["TV_SIGNAL"],
             "earn_days":     p["EARN_DAYS"],
             "earnings_flag": p["EARNINGS_FLAG"],
         } for p in pullbacks]
 
         prompt = (
-            "You are a technical analyst reviewing weekly pullback setups.\n\n"
-            "Metrics: drop_pct=weekly range%, recovery_pct=% of drop already recovered "
-            "(0%=still at low), sctr=technical rank≥90, rsi=14d RSI (50-70 healthy), "
-            "earnings_flag=true means earnings within 14 days.\n\n"
-            "Verdicts: BUYABLE_DIP (sctr strong, rsi 45-75, recovery<50%, no earnings), "
-            "ALREADY_BOUNCED (recovery>70%), RISKY (sctr weakening or rsi extreme), "
-            "EARNINGS_RISK (earnings_flag true).\n\n"
-            "Return ONLY a JSON array:\n"
-            '[{"symbol":"X","verdict":"BUYABLE_DIP","reason":"1 sentence.","confidence":"HIGH"}]\n\n'
+            "You are a senior swing trader analyzing weekly pullback setups in high-SCTR stocks.\n\n"
+            "DATA FIELDS:\n"
+            "- current / week_high / week_low: actual dollar prices — use these to calculate entry, stop, target\n"
+            "- drop_pct: weekly high-to-low range % (size of pullback)\n"
+            "- recovery_pct: how much of the drop has already been recovered (0%=still at low, 100%=fully bounced)\n"
+            "- sctr: StockCharts Technical Rank (≥90 strong, 95+ very strong)\n"
+            "- sctr_momentum: 21-day SCTR trend (positive=improving, negative=weakening)\n"
+            "- tv_rsi: live RSI-14 from TradingView\n"
+            "- tv_signal: TradingView recommendation (Strong Buy/Buy/Neutral/Sell/Strong Sell)\n"
+            "- earn_days: days to next earnings; earnings_flag=true means within 14 days\n"
+            "- change_pct: today's price change %\n\n"
+            "VERDICT OPTIONS:\n"
+            "- BUYABLE_DIP: SCTR ≥92, RSI 45–75, recovery_pct <55%, no earnings flag\n"
+            "- ALREADY_BOUNCED: recovery_pct >70% — entry window likely closed\n"
+            "- RISKY: sctr_momentum negative + rsi <50, or tv_signal Sell/Strong Sell, or sctr <91, or rsi >78\n"
+            "- EARNINGS_RISK: earnings_flag true\n\n"
+            "For EACH stock return JSON with:\n"
+            "- symbol, verdict, confidence (HIGH/MEDIUM/LOW)\n"
+            "- entry: specific $ price or tight range (e.g. '$147–150') based on current and week_low\n"
+            "- stop: specific $ stop-loss, typically 2–4% below entry or just below week_low\n"
+            "- target: specific $ target based on week_high or prior resistance\n"
+            "- reason: 3–4 sentences. Reference actual numbers (RSI, recovery %, SCTR, today's move, TV signal). "
+            "Explain what makes this setup compelling or concerning. Give a clear trading rationale.\n\n"
+            "Return ONLY a valid JSON array, no markdown:\n"
+            '[{"symbol":"X","verdict":"BUYABLE_DIP","confidence":"HIGH","entry":"$147–150","stop":"$142","target":"$162","reason":"..."}]\n\n'
             f"Stocks:\n{json.dumps(stripped, indent=2)}"
         )
 
@@ -275,15 +342,17 @@ def run_pullback_telegram(token, chat_id, supabase_url, supabase_key, anthropic_
             messages=[{"role": "user", "content": prompt}],
         )
 
-        text = (response.content[0].text or "").strip()
+        text  = (response.content[0].text or "").strip()
         match = re.search(r"\[[\s\S]*\]", text)
         if not match:
             print("⚠️ Claude did not return a JSON array.")
             return
 
-        analyses = json.loads(match.group(0))
+        analyses   = json.loads(match.group(0))
+        pb_by_sym  = {p["SYMBOL"]: p for p in pullbacks}
+        buyable    = [a for a in analyses if a["verdict"] == "BUYABLE_DIP"]
+        today_str  = datetime.today().strftime("%Y-%m-%d")
 
-        # Build Telegram message
         EMOJI = {
             "BUYABLE_DIP":     "✅",
             "ALREADY_BOUNCED": "⏭",
@@ -291,41 +360,42 @@ def run_pullback_telegram(token, chat_id, supabase_url, supabase_key, anthropic_
             "EARNINGS_RISK":   "⚠️",
         }
 
-        buyable = [a for a in analyses if a["verdict"] == "BUYABLE_DIP"]
-        today_str = datetime.today().strftime("%Y-%m-%d")
-
         lines = [
-            f"🤖 <b>AI Pullback Analysis</b>",
-            f"📅 {today_str}  ·  {len(pullbacks)} candidates  ·  {len(buyable)} buyable dip{'s' if len(buyable) != 1 else ''}",
+            "🤖 <b>AI Pullback Analysis</b>",
+            f"📅 {today_str}  ·  {len(pullbacks)} candidates  ·  "
+            f"<b>{len(buyable)}</b> buyable dip{'s' if len(buyable) != 1 else ''}",
             "",
         ]
 
-        pb_by_sym = {p["SYMBOL"]: p for p in pullbacks}
-
+        # Full detail for BUYABLE_DIP
         for a in analyses:
-            sym     = a["symbol"]
-            verdict = a["verdict"]
-            emoji   = EMOJI.get(verdict, "❓")
-            conf    = a.get("confidence", "")
-            reason  = a.get("reason", "")
-            pb      = pb_by_sym.get(sym, {})
-            sctr    = pb.get("LATEST_SCTR")
-            drop    = pb.get("DROP_PCT")
-            rec     = pb.get("RECOVERY_PCT")
+            if a["verdict"] != "BUYABLE_DIP":
+                continue
+            sym  = a["symbol"]
+            pb   = pb_by_sym.get(sym, {})
+            conf = a.get("confidence", "")
 
             meta_parts = []
-            if sctr is not None: meta_parts.append(f"SCTR {sctr:.0f}")
-            if drop  is not None: meta_parts.append(f"Drop {drop:.1f}%")
-            if rec   is not None: meta_parts.append(f"Rec {rec:.0f}%")
+            if pb.get("LATEST_SCTR"): meta_parts.append(f"SCTR {pb['LATEST_SCTR']:.0f}")
+            if pb.get("DROP_PCT"):    meta_parts.append(f"Drop {pb['DROP_PCT']:.1f}%")
+            if pb.get("RECOVERY_PCT") is not None: meta_parts.append(f"Rec {pb['RECOVERY_PCT']:.0f}%")
+            if pb.get("TV_RSI"):      meta_parts.append(f"RSI {pb['TV_RSI']:.1f}")
+            if pb.get("TV_SIGNAL"):   meta_parts.append(pb["TV_SIGNAL"])
             meta = " · ".join(meta_parts)
 
-            if verdict == "BUYABLE_DIP":
-                lines.append(f"{emoji} <b>{sym}</b>  <i>({meta})</i>")
-                lines.append(f"{reason}")
-                lines.append("")
-            else:
-                verdict_label = verdict.replace("_", " ").title()
-                lines.append(f"{emoji} <b>{sym}</b> — {verdict_label}  <i>({meta})</i>")
+            trade_parts = []
+            if a.get("entry"):  trade_parts.append(f"Entry <b>{a['entry']}</b>")
+            if a.get("stop"):   trade_parts.append(f"Stop <b>{a['stop']}</b>")
+            if a.get("target"): trade_parts.append(f"Target <b>{a['target']}</b>")
+            trade_line = "  |  ".join(trade_parts)
+
+            sector_str = f" · {pb['SECTOR']}" if pb.get("SECTOR") else ""
+            lines.append(f"✅ <b>{sym}</b> — {pb.get('NAME', sym)}{sector_str}")
+            lines.append(f"<i>{meta}</i>  ·  {conf} confidence")
+            if trade_line:
+                lines.append(f"📊 {trade_line}")
+            lines.append(a.get("reason", ""))
+            lines.append("")
 
         message = "\n".join(lines)
         if len(message) > 4000:
@@ -353,12 +423,12 @@ def scrape_sctr_table(exclude_earnings_days=7):
 
         try:
             page.goto("https://stockcharts.com/freecharts/sctr.html",
-                      wait_until="networkidle", timeout=120000)
+                      wait_until="domcontentloaded", timeout=60000)
             page.wait_for_selector("table tbody tr", timeout=60000)
             print("✅ Page loaded, extracting table...")
         except Exception:
             print("⚠️ First attempt failed, retrying...")
-            page.reload(wait_until="networkidle", timeout=120000)
+            page.reload(wait_until="domcontentloaded", timeout=60000)
             page.wait_for_selector("table tbody tr", timeout=60000)
 
         data = page.evaluate("""
