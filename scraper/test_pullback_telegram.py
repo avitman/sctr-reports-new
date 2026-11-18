@@ -22,10 +22,10 @@ if os.path.exists(env_path):
 from scrape_sctr import run_pullback_telegram, _send_telegram
 
 supabase_url  = os.environ.get("SUPABASE_URL", "")
-supabase_key  = os.environ.get("SUPABASE_KEY", "")
+supabase_key  = os.environ.get("SUPABASE_PUBLISHABLE_KEY") or os.environ.get("SUPABASE_KEY", "")
 anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
-required = {"SUPABASE_URL": supabase_url, "SUPABASE_KEY": supabase_key, "ANTHROPIC_API_KEY": anthropic_key}
+required = {"SUPABASE_URL": supabase_url, "SUPABASE_PUBLISHABLE_KEY": supabase_key, "ANTHROPIC_API_KEY": anthropic_key}
 if not DRY_RUN:
     required["TELEGRAM_TOKEN"]   = os.environ.get("TELEGRAM_TOKEN", "")
     required["TELEGRAM_CHAT_ID"] = os.environ.get("TELEGRAM_CHAT_ID", "")

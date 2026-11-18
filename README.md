@@ -82,7 +82,7 @@ Go to **Settings → Secrets and variables → Actions** and add:
 | Variable | Value |
 |---|---|
 | `SUPABASE_URL` | Your Supabase project URL |
-| `SUPABASE_KEY` | Your Supabase **anon** key (public, read-only thanks to RLS) |
+| `SUPABASE_PUBLISHABLE_KEY` | Your Supabase **publishable** key (`sb_publishable_...`) — public, read-only thanks to RLS |
 
 5. Trigger a redeploy — your dashboard is live at `https://your-site.vercel.app`
 
