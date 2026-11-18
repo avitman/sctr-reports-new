@@ -562,8 +562,9 @@ def scrape_sctr_table(exclude_earnings_days=7):
         save_cache(cache)
 
         # Upload to Supabase
+        # Writes need the service_role key (bypasses RLS). Never expose it to the site.
         supabase_url = os.environ.get("SUPABASE_URL", "")
-        supabase_key = os.environ.get("SUPABASE_KEY", "")
+        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
         if supabase_url and supabase_key:
             from supabase import create_client
             db = create_client(supabase_url, supabase_key)
@@ -580,7 +581,7 @@ def scrape_sctr_table(exclude_earnings_days=7):
             db.table("sctr_daily").upsert(records.to_dict(orient="records")).execute()
             print(f"✅ Uploaded {len(records)} rows to Supabase for {today_str}")
         else:
-            print("⚠️ SUPABASE_URL/KEY not set — skipping Supabase upload")
+            print("⚠️ SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY not set — skipping Supabase upload")
 
         # Send Telegram notification
         token = os.environ.get("TELEGRAM_TOKEN", "")

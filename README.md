@@ -59,6 +59,8 @@ Every weekday the scraper:
 
 Create a project at [supabase.com](https://supabase.com) and run the schema in `dashboard/doc/dashboard_spec.md`.
 
+Then run [`supabase/rls.sql`](supabase/rls.sql) in the SQL editor. It enables Row Level Security on `sctr_daily` so the public anon key (served to every visitor by `/api/config`) can only **read**. Only the scraper, using the service_role key, can write.
+
 ### 2. GitHub Secrets (for the scraper)
 
 Go to **Settings → Secrets and variables → Actions** and add:
@@ -66,7 +68,7 @@ Go to **Settings → Secrets and variables → Actions** and add:
 | Secret | Value |
 |---|---|
 | `SUPABASE_URL` | Your Supabase project URL |
-| `SUPABASE_KEY` | Your Supabase anon key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Your Supabase **service_role** key (Project Settings → API). Secret — never put it in Vercel or the site. |
 | `TELEGRAM_TOKEN` | Your Telegram bot token |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat ID |
 
@@ -80,7 +82,7 @@ Go to **Settings → Secrets and variables → Actions** and add:
 | Variable | Value |
 |---|---|
 | `SUPABASE_URL` | Your Supabase project URL |
-| `SUPABASE_KEY` | Your Supabase anon key |
+| `SUPABASE_KEY` | Your Supabase **anon** key (public, read-only thanks to RLS) |
 
 5. Trigger a redeploy — your dashboard is live at `https://your-site.vercel.app`
 
